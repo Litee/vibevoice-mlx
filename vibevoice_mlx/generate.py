@@ -6,6 +6,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
+from tqdm import tqdm
+
 import numpy as np
 
 import mlx.core as mx
@@ -262,6 +264,7 @@ def generate(
     semantic_encoder_fn: Optional[Callable] = None,
     semantic_reset_fn: Optional[Callable] = None,
     voice_embeds: Optional[dict[int, mx.array]] = None,
+    estimated_total: Optional[int] = None,
 ) -> tuple[np.ndarray, GenerationMetrics]:
     """Full autoregressive TTS generation.
 
@@ -273,6 +276,8 @@ def generate(
             Signature: fn(audio_chunk: np.ndarray) -> np.ndarray of shape (1, 1, hidden_size)
         voice_embeds: Optional dict mapping position -> embedding for voice cloning.
             Each value is an mx.array of shape (1, hidden_size).
+        estimated_total: Estimated total speech tokens for progress bar.
+            If None, falls back to n_prefill as a rough guess.
 
     Returns:
         (audio_array, metrics)
@@ -383,6 +388,13 @@ def generate(
     if config.single_segment:
         stop_tokens.add(config.speech_end_id)
 
+    # Setup progress bar — use estimated total if provided, else rough guess
+    pbar = tqdm(
+        total=estimated_total if estimated_total is not None else n_prefill,
+        desc="Generating",
+        unit="tok",
+    )
+
     for step in range(opts.max_speech_tokens * 3):
         if next_token in stop_tokens:
             break
@@ -391,6 +403,9 @@ def generate(
 
         if next_token == config.speech_diffusion_id:
             metrics.num_speech_tokens += 1
+
+            # Update progress bar
+            pbar.update(1)
 
             # Diffusion (fast path — no nn.Module dispatch)
             t0 = time.perf_counter()
@@ -477,6 +492,9 @@ def generate(
         # Free MLX Metal buffer pool every 10 steps to prevent unbounded growth.
         if step % 10 == 0:
             mx.clear_cache()
+
+    # Close progress bar
+    pbar.close()
 
     # Batch re-decode all latents for temporally continuous audio
     if all_latents:

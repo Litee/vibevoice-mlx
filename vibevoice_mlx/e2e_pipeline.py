@@ -609,6 +609,7 @@ def main():
         semantic_encoder_fn=semantic_fn,
         semantic_reset_fn=semantic_reset,
         voice_embeds=voice_embeds,
+        estimated_total=len(input_ids),
     )
 
     gen_time = (time.perf_counter() - t0) * 1000
