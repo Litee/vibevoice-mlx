@@ -125,7 +125,7 @@ Text ──→ Qwen2.5 LLM backbone ──→ control tokens
 - **Streaming semantic encoder**: 34-buffer causal CNN for real-time feedback
 - **CoreML semantic pipelining**: Offload semantic encoder to ANE while GPU runs LLM
 - **Selective quantization**: LLM backbone quantized (int4/int8), diffusion head stays full precision
-- **PyTorch-compatible RNG**: Pure Python MT19937 + Box-Muller matching `torch.randn()` exactly
+- **MLX-native RNG**: Uses MLX's Threefry Mersenne-Prime generator for fast, on-device noise sampling
 - **bf16→fp16 conversion**: 2x faster inference on Apple Silicon vs bfloat16
 
 ## Project structure
@@ -138,8 +138,8 @@ vibevoice_mlx/
 ├── load_weights.py     HuggingFace weight loading and key mapping
 ├── streaming_vae.py    Streaming VAE decoder with conv caches
 ├── semantic_encoder.py Pure MLX streaming semantic encoder
-├── fast_forward.py     Optimized LM and diffusion head forward
-└── numpy_rng.py        PyTorch-compatible RNG (MT19937 + Box-Muller)
+└── fast_forward.py     Optimized LM and diffusion head forward
+
 convert.py              Weight conversion and HuggingFace upload
 bench_compare.py        Quantization and config benchmark suite
 ```
