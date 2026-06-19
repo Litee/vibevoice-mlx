@@ -599,7 +599,7 @@ def main():
     )
 
     print("Generating...")
-    mx.metal.reset_peak_memory()
+    mx.reset_peak_memory()
     t0 = time.perf_counter()
 
     audio, metrics = generate(
@@ -626,7 +626,7 @@ def main():
               f"({summary.get('lm_step_mean_ms', 0):.1f}ms/step)")
     if "gen_rtf" in summary:
         print(f"  RTF: {summary['gen_rtf']:.2f}x realtime")
-    peak_mem = mx.metal.get_peak_memory() / 1e9
+    peak_mem = mx.get_peak_memory() / 1e9
     print(f"  Peak memory: {peak_mem:.2f} GB")
 
     # Save
