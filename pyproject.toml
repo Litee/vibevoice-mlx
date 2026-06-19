@@ -6,10 +6,11 @@ requires-python = ">=3.10"
 license = "MIT"
 dependencies = [
     "mlx>=0.22.0",
+    "safetensors",
+    "scipy",
     "soundfile",
     "transformers>=4.40.0",
     "huggingface_hub",
-    "safetensors",
 ]
 
 [project.optional-dependencies]
