@@ -352,18 +352,16 @@ def generate(
     metrics.record("prefill", (time.perf_counter() - t0) * 1000)
     metrics.num_text_tokens = n_prefill
 
-    # Single-segment models (KugelAudio): constrain to speech-structural tokens
-    # only to prevent text token hallucination and looping.
-    # Multi-segment models (VibeVoice): allow all tokens for speaker turns.
-    if config.single_segment:
-        allowed_tokens = mx.array([
-            config.speech_start_id, config.speech_end_id,
-            config.speech_diffusion_id, config.eos_id,
-        ])
-        logit_mask = mx.full((1, 1, config.vocab_size), float("-inf"), dtype=dtype)
-        logit_mask[0, 0, allowed_tokens] = 0.0
-    else:
-        logit_mask = None
+    # Constrain to speech-structural tokens only to prevent text token
+    # hallucination and premature EOS. Matches original PyTorch VibeVoice
+    # VibeVoiceTokenConstraintProcessor behavior (valid_tokens = speech_start,
+    # speech_end, speech_diffusion, eos). The speaker labels are in the input,
+    # not the output — the model only generates speech tokens.
+    allowed_tokens = mx.array([
+        config.speech_start_id, config.speech_end_id,
+        config.speech_diffusion_id, config.eos_id,
+    ])
+    logit_mask = mx.full((1, 1, config.vocab_size), float("-inf"), dtype=mx.float32)
 
     # First token
     logits = fast_lm.logits(hidden)
