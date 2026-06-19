@@ -474,6 +474,10 @@ def generate(
         metrics.record("lm_step", (time.perf_counter() - t0) * 1000)
         position += 1
 
+        # Free MLX Metal buffer pool every 10 steps to prevent unbounded growth.
+        if step % 10 == 0:
+            mx.clear_cache()
+
     # Batch re-decode all latents for temporally continuous audio
     if all_latents:
         t0 = time.perf_counter()
