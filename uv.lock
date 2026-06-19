@@ -1479,6 +1479,7 @@ dependencies = [
     { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "soundfile" },
+    { name = "tqdm" },
     { name = "transformers" },
 ]
 
@@ -1499,6 +1500,7 @@ requires-dist = [
     { name = "scipy" },
     { name = "soundfile" },
     { name = "torch", marker = "extra == 'convert'", specifier = ">=2.5.0" },
+    { name = "tqdm" },
     { name = "transformers", specifier = ">=4.40.0" },
 ]
 provides-extras = ["coreml", "convert"]
