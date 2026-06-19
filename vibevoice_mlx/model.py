@@ -337,9 +337,9 @@ class VAEDecoder:
                     stride=stride,
                 ).transpose(0, 2, 1) + b[:, None]
                 K_up = w.shape[-1]
-                trim = (K_up - stride) // 2
-                if trim > 0:
-                    x = x[:, :, trim:-trim]
+                padding_right = K_up - stride
+                if padding_right > 0:
+                    x = x[:, :, :-padding_right]
 
         # Head conv (causal)
         K = self.head_w.shape[-1]
