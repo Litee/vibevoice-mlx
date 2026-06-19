@@ -60,13 +60,13 @@ def load_config(model_path: Path) -> VibeVoiceConfig:
     is_kugelaudio = (
         "kugelaudio" in model_type
         or "kugelaudio" in base_model
-        or (scaling is not None and abs(scaling - 0.1953125) < 1e-6)
+        or (
+            scaling is not None
+            and abs(scaling - 0.1953125) < 1e-6
+            and "vibevoice" not in model_type
+            and "vibevoice" not in base_model
+        )
     )
-    # Debug: print detection info
-    raw_single = raw.get("single_segment", "NOT_SET")
-    dec_single = dec.get("single_segment", "NOT_SET")
-    print(f"[DEBUG load] model_type={model_type!r}, base_model={base_model!r}, scaling={scaling}")
-    print(f"[DEBUG load] is_kugelaudio={is_kugelaudio}, raw.single_segment={raw_single}, dec.single_segment={dec_single}")
 
     return VibeVoiceConfig(
         hidden_size=_get("hidden_size", default=1536),
