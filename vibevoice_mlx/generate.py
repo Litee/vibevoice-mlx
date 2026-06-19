@@ -394,11 +394,27 @@ def generate(
         unit="tok",
     )
 
+    # Debug: track token types to diagnose premature EOS
+    token_log = []
+    TOKEN_NAMES = {
+        config.speech_start_id: "SS",
+        config.speech_end_id: "SE",
+        config.speech_diffusion_id: "D",
+        config.eos_id: "EOS",
+    }
+
     for step in range(opts.max_speech_tokens * 3):
         if next_token in stop_tokens:
+            # Debug: print generation summary
+            print(f"\n[DEBUG] Stopped at step {step}, token={next_token} ({TOKEN_NAMES.get(next_token, f'UNK-{next_token}')}), speech_tokens={metrics.num_speech_tokens}")
+            print(f"[DEBUG] Token log (last 20): {token_log[-20:] if len(token_log) > 20 else token_log}")
             break
         if metrics.num_speech_tokens >= opts.max_speech_tokens:
             break
+
+        # Debug: track token types
+        tok_name = TOKEN_NAMES.get(next_token, f"T-{next_token}")
+        token_log.append(tok_name)
 
         if next_token == config.speech_diffusion_id:
             metrics.num_speech_tokens += 1
