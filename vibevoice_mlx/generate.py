@@ -306,8 +306,8 @@ def generate(
         neg_embed = embed_table[config.speech_start_id].reshape(1, 1, config.hidden_size)
         neg_pos = mx.arange(1, dtype=mx.float32)
         neg_cos, neg_sin = compute_rope(neg_pos, config.head_dim, config.rope_theta)
-        neg_k_cache = [mx.zeros((1, config.num_key_value_heads, 0, config.head_dim), dtype=dtype)] * NL
-        neg_v_cache = [mx.zeros((1, config.num_key_value_heads, 0, config.head_dim), dtype=dtype)] * NL
+        neg_k_cache = [mx.zeros((1, config.num_key_value_heads, 0, config.head_dim), dtype=dtype) for _ in range(NL)]
+        neg_v_cache = [mx.zeros((1, config.num_key_value_heads, 0, config.head_dim), dtype=dtype) for _ in range(NL)]
         neg_hidden = fast_lm.forward(neg_embed, neg_cos, neg_sin, neg_k_cache, neg_v_cache)
         mx.eval(neg_hidden, *neg_k_cache, *neg_v_cache)
         neg_condition = neg_hidden[:, 0:1, :].reshape(1, config.hidden_size)
