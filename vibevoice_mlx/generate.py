@@ -362,6 +362,7 @@ def generate(
         config.speech_diffusion_id, config.eos_id,
     ])
     logit_mask = mx.full((1, 1, config.vocab_size), float("-inf"), dtype=mx.float32)
+    logit_mask[0, 0, allowed_tokens] = 0.0
 
     # First token
     logits = fast_lm.logits(hidden)
