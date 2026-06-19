@@ -386,6 +386,9 @@ def generate(
     stop_tokens = {config.eos_id}
     if config.single_segment:
         stop_tokens.add(config.speech_end_id)
+    # Debug: print model config and token IDs
+    print(f"[DEBUG] single_segment={config.single_segment}, stop_tokens={stop_tokens}")
+    print(f"[DEBUG] speech_start_id={config.speech_start_id}, speech_end_id={config.speech_end_id}, speech_diffusion_id={config.speech_diffusion_id}, eos_id={config.eos_id}")
 
     # Setup progress bar — use estimated total if provided, else rough guess
     pbar = tqdm(
@@ -402,6 +405,8 @@ def generate(
         config.speech_diffusion_id: "D",
         config.eos_id: "EOS",
     }
+    # Debug: check semantic feedback status
+    print(f"[DEBUG] semantic_encoder_fn={'loaded' if semantic_encoder_fn is not None else 'NONE'}")
 
     for step in range(opts.max_speech_tokens * 3):
         if next_token in stop_tokens:
