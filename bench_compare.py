@@ -108,7 +108,7 @@ opts = GenerationOptions(
     seed={seed},
 )
 
-mx.metal.reset_peak_memory()
+mx.reset_peak_memory()
 t0 = time.perf_counter()
 audio, metrics = generate(
     model=model,
@@ -121,7 +121,7 @@ audio, metrics = generate(
 gen_s = time.perf_counter() - t0
 
 summary = metrics.summary()
-peak = mx.metal.get_peak_memory() / 1e9
+peak = mx.get_peak_memory() / 1e9
 audio_s = summary.get("audio_seconds", 0)
 rtf = audio_s / gen_s if gen_s > 0 else 0
 
