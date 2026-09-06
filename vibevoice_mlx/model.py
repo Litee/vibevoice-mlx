@@ -84,23 +84,60 @@ def apply_rope(x: mx.array, cos: mx.array, sin: mx.array) -> mx.array:
 # ---------------------------------------------------------------------------
 
 class KVCache:
-    """KV cache with concatenation (MLX lazy eval handles this efficiently)."""
+    """Block-grown backing buffers; update returns only the populated prefix."""
 
-    def __init__(self, num_layers: int):
+    def __init__(self, num_layers: int, growth_step: int = 256) -> None:
+        if growth_step <= 0:
+            raise ValueError("growth_step must be positive")
+        self.growth_step = growth_step
         self.keys: list[mx.array | None] = [None] * num_layers
         self.values: list[mx.array | None] = [None] * num_layers
+        self._lengths = [0] * num_layers
         self.offset = 0
 
-    def update(self, layer_idx: int, k: mx.array, v: mx.array) -> tuple[mx.array, mx.array]:
-        if self.keys[layer_idx] is None:
-            self.keys[layer_idx] = k
-            self.values[layer_idx] = v
-        else:
-            self.keys[layer_idx] = mx.concatenate([self.keys[layer_idx], k], axis=2)
-            self.values[layer_idx] = mx.concatenate([self.values[layer_idx], v], axis=2)
-        return self.keys[layer_idx], self.values[layer_idx]
+    def reset(self) -> None:
+        self.keys = [None] * len(self.keys)
+        self.values = [None] * len(self.values)
+        self._lengths = [0] * len(self.keys)
+        self.offset = 0
 
-    def advance(self, n: int = 1):
+    def update(
+        self, layer_idx: int, k: mx.array, v: mx.array
+    ) -> tuple[mx.array, mx.array]:
+        start = self._lengths[layer_idx]
+        end = start + k.shape[2]
+        capacity = ((end + self.growth_step - 1) // self.growth_step) * self.growth_step
+        if self.keys[layer_idx] is None:
+            self.keys[layer_idx] = mx.zeros(
+                (*k.shape[:2], capacity, k.shape[3]), dtype=k.dtype
+            )
+            self.values[layer_idx] = mx.zeros(
+                (*v.shape[:2], capacity, v.shape[3]), dtype=v.dtype
+            )
+        elif end > self.keys[layer_idx].shape[2]:
+            extra = capacity - self.keys[layer_idx].shape[2]
+            self.keys[layer_idx] = mx.concatenate(
+                [
+                    self.keys[layer_idx],
+                    mx.zeros((*k.shape[:2], extra, k.shape[3]), dtype=k.dtype),
+                ],
+                axis=2,
+            )
+            self.values[layer_idx] = mx.concatenate(
+                [
+                    self.values[layer_idx],
+                    mx.zeros((*v.shape[:2], extra, v.shape[3]), dtype=v.dtype),
+                ],
+                axis=2,
+            )
+        self.keys[layer_idx][:, :, start:end, :] = k
+        self.values[layer_idx][:, :, start:end, :] = v
+        self._lengths[layer_idx] = end
+        return self.keys[layer_idx][:, :, :end, :], self.values[layer_idx][
+            :, :, :end, :
+        ]
+
+    def advance(self, n: int = 1) -> None:
         self.offset += n
 
 

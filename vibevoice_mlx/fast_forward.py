@@ -15,7 +15,7 @@ import math
 import mlx.core as mx
 import mlx.nn as nn
 
-from .model import VibeVoiceModel, VibeVoiceConfig, apply_rope
+from .model import KVCache, VibeVoiceModel, VibeVoiceConfig, apply_rope
 
 
 # ---------------------------------------------------------------------------
@@ -89,18 +89,22 @@ class FastLM:
         else:
             self.lm_head_w = None  # tied
 
-    def forward(self, h, cos, sin, k_cache, v_cache):
+    def forward(
+        self, h: mx.array, cos: mx.array, sin: mx.array, cache: KVCache
+    ) -> mx.array:
         """Single-step LM forward with KV cache.
 
         h: (1, Q, H)
         cos, sin: (Q, HD) from compute_rope
-        k_cache, v_cache: lists of (1, NKV, S, HD) arrays
-        Returns: hidden (1, Q, H), updates k_cache/v_cache in place.
+        cache: layer KV buffers, updated with this token.
+        Returns: hidden (1, Q, H).
         """
-        return self._forward_inner(h, cos, sin, k_cache, v_cache)
+        return self._forward_inner(h, cos, sin, cache)
 
-    def forward_dual(self, h_main, cos_main, sin_main, k_cache, v_cache,
-                     h_neg, cos_neg, sin_neg, neg_k_cache, neg_v_cache):
+    def forward_dual(
+        self, h_main: mx.array, cos_main: mx.array, sin_main: mx.array, cache: KVCache,
+        h_neg: mx.array, cos_neg: mx.array, sin_neg: mx.array, neg_cache: KVCache,
+    ) -> tuple[mx.array, mx.array]:
         """Batched main+neg LM forward — reads weights once for both.
 
         Returns: (hidden_main, hidden_neg), updates both KV caches.
@@ -139,10 +143,9 @@ class FastLM:
             v_m = v_m.reshape(1, -1, NKV, HD).transpose(0, 2, 1, 3)
             q_m = apply_rope(q_m, cos_main, sin_main)
             k_m = apply_rope(k_m, cos_main, sin_main)
-            k_cache[li] = mx.concatenate([k_cache[li], k_m], axis=2)
-            v_cache[li] = mx.concatenate([v_cache[li], v_m], axis=2)
+            keys, values = cache.update(li, k_m, v_m)
             out_m = mx.fast.scaled_dot_product_attention(
-                q_m, k_cache[li], v_cache[li], scale=scale,
+                q_m, keys, values, scale=scale,
             ).transpose(0, 2, 1, 3).reshape(1, -1, H)
 
             # Neg attention
@@ -151,10 +154,9 @@ class FastLM:
             v_n = v_n.reshape(1, -1, NKV, HD).transpose(0, 2, 1, 3)
             q_n = apply_rope(q_n, cos_neg, sin_neg)
             k_n = apply_rope(k_n, cos_neg, sin_neg)
-            neg_k_cache[li] = mx.concatenate([neg_k_cache[li], k_n], axis=2)
-            neg_v_cache[li] = mx.concatenate([neg_v_cache[li], v_n], axis=2)
+            neg_keys, neg_values = neg_cache.update(li, k_n, v_n)
             out_n = mx.fast.scaled_dot_product_attention(
-                q_n, neg_k_cache[li], neg_v_cache[li], scale=scale,
+                q_n, neg_keys, neg_values, scale=scale,
             ).transpose(0, 2, 1, 3).reshape(1, -1, H)
 
             # Batch o_proj + MLP
@@ -171,7 +173,9 @@ class FastLM:
         hn_input = mx.fast.rms_norm(hn_input, self.norm_w, eps)
         return hm, hn_input
 
-    def _forward_inner(self, h, cos, sin, k_cache, v_cache):
+    def _forward_inner(
+        self, h: mx.array, cos: mx.array, sin: mx.array, cache: KVCache
+    ) -> mx.array:
         NH, NKV, HD, H = self.NH, self.NKV, self.HD, self.H
         scale = self.scale
         eps = self.eps
@@ -197,11 +201,10 @@ class FastLM:
             q = apply_rope(q, cos, sin)
             k = apply_rope(k, cos, sin)
 
-            k_cache[li] = mx.concatenate([k_cache[li], k], axis=2)
-            v_cache[li] = mx.concatenate([v_cache[li], v], axis=2)
+            keys, values = cache.update(li, k, v)
 
             out = mx.fast.scaled_dot_product_attention(
-                q, k_cache[li], v_cache[li], scale=scale,
+                q, keys, values, scale=scale,
             ).transpose(0, 2, 1, 3).reshape(1, -1, H)
 
             h = res + _mm(out, d["o"])
@@ -218,12 +221,16 @@ class FastLM:
             return (h.astype(mx.float32) @ self.lm_head_w.astype(mx.float32).T).astype(h.dtype)
         return (h.astype(mx.float32) @ self.embed_w.astype(mx.float32).T).astype(h.dtype)
 
-    def prefill(self, embeds, cos, sin, mask, k_cache, v_cache):
+    def prefill(
+        self, embeds: mx.array, cos: mx.array, sin: mx.array,
+        mask: mx.array, cache: KVCache,
+    ) -> mx.array:
         """Batched prefill (Q>1) with causal mask. Same as forward but with mask."""
         NH, NKV, HD, H = self.NH, self.NKV, self.HD, self.H
         scale = self.scale
         eps = self.eps
         h = embeds
+        cache.reset()
 
         for li, d in enumerate(self.layers):
             res = h
@@ -246,8 +253,7 @@ class FastLM:
             q = apply_rope(q, cos, sin)
             k = apply_rope(k, cos, sin)
 
-            k_cache[li] = k
-            v_cache[li] = v
+            cache.update(li, k, v)
 
             out = mx.fast.scaled_dot_product_attention(
                 q, k, v, scale=scale, mask=mask,

@@ -313,16 +313,15 @@ def generate(
         neg_embed = embed_table[config.speech_start_id].reshape(1, 1, config.hidden_size)
         neg_pos = mx.arange(1, dtype=mx.float32)
         neg_cos, neg_sin = compute_rope(neg_pos, config.head_dim, config.rope_theta)
-        neg_k_cache = [mx.zeros((1, config.num_key_value_heads, 0, config.head_dim), dtype=dtype) for _ in range(NL)]
-        neg_v_cache = [mx.zeros((1, config.num_key_value_heads, 0, config.head_dim), dtype=dtype) for _ in range(NL)]
-        neg_hidden = fast_lm.forward(neg_embed, neg_cos, neg_sin, neg_k_cache, neg_v_cache)
-        mx.eval(neg_hidden, *neg_k_cache, *neg_v_cache)
+        neg_cache = KVCache(NL)
+        neg_hidden = fast_lm.forward(neg_embed, neg_cos, neg_sin, neg_cache)
+        mx.eval(neg_hidden, *neg_cache.keys, *neg_cache.values)
         neg_condition = neg_hidden[:, 0:1, :].reshape(1, config.hidden_size)
         neg_position = 1
     else:
         # Static zero condition for CFG=1.0 (no guidance)
         neg_condition = mx.zeros((1, config.hidden_size), dtype=dtype)
-        neg_k_cache = neg_v_cache = None
+        neg_cache = None
         neg_position = 0
 
     # Prefill (use fast_lm.prefill for batched tokens)
@@ -345,10 +344,9 @@ def generate(
     cos_prefill, sin_prefill = compute_rope(positions, config.head_dim, config.rope_theta)
     causal_mask = mx.triu(mx.full((n_prefill, n_prefill), float("-inf"), dtype=dtype), k=1)
 
-    k_cache = [None] * NL
-    v_cache = [None] * NL
-    hidden = fast_lm.prefill(prefill_embeds, cos_prefill, sin_prefill, causal_mask, k_cache, v_cache)
-    mx.eval(hidden, *[k for k in k_cache], *[v for v in v_cache])
+    cache = KVCache(NL)
+    hidden = fast_lm.prefill(prefill_embeds, cos_prefill, sin_prefill, causal_mask, cache)
+    mx.eval(hidden, *cache.keys, *cache.values)
     hidden = hidden[:, -1:, :]
 
     metrics.record("prefill", (time.perf_counter() - t0) * 1000)
@@ -467,13 +465,13 @@ def generate(
             neg_pos = mx.array([float(neg_position)], dtype=mx.float32)
             neg_cos, neg_sin = compute_rope(neg_pos, config.head_dim, config.rope_theta)
             hidden, neg_hidden = fast_lm.forward_dual(
-                next_embed, cos, sin, k_cache, v_cache,
-                next_embed, neg_cos, neg_sin, neg_k_cache, neg_v_cache,
+                next_embed, cos, sin, cache,
+                next_embed, neg_cos, neg_sin, neg_cache,
             )
             neg_condition = neg_hidden[:, 0:1, :].reshape(1, config.hidden_size)
             neg_position += 1
         else:
-            hidden = fast_lm.forward(next_embed, cos, sin, k_cache, v_cache)
+            hidden = fast_lm.forward(next_embed, cos, sin, cache)
 
         logits = fast_lm.logits(hidden)
         if logit_mask is not None:
