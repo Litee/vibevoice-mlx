@@ -89,6 +89,23 @@ class FastLM:
         else:
             self.lm_head_w = None  # tied
 
+        # Ascending IDs preserve full-vocabulary argmax tie-breaking.
+        self.speech_token_ids = tuple(
+            sorted(
+                {
+                    config.speech_start_id,
+                    config.speech_end_id,
+                    config.speech_diffusion_id,
+                    config.eos_id,
+                }
+            )
+        )
+        self._stop_indices = (
+            self.speech_token_ids.index(config.speech_end_id),
+            self.speech_token_ids.index(config.eos_id),
+        )
+        self._speech_head_w: mx.array | None = None
+
     def forward(
         self, h: mx.array, cos: mx.array, sin: mx.array, cache: KVCache
     ) -> mx.array:
@@ -215,11 +232,35 @@ class FastLM:
 
         return mx.fast.rms_norm(h, self.norm_w, eps)
 
-    def logits(self, h):
-        """Compute logits in float32 for numerical stability."""
-        if self.lm_head_w is not None:
-            return (h.astype(mx.float32) @ self.lm_head_w.astype(mx.float32).T).astype(h.dtype)
-        return (h.astype(mx.float32) @ self.embed_w.astype(mx.float32).T).astype(h.dtype)
+    def logits(self, h: mx.array, *, speech_only: bool = False) -> mx.array:
+        """Compute float32-accumulated logits, cast back to the input dtype.
+
+        With speech_only, the last axis follows speech_token_ids instead of
+        vocabulary IDs. Cache only those rows to avoid scanning the full head.
+        """
+        weight = self.lm_head_w if self.lm_head_w is not None else self.embed_w
+        if speech_only:
+            if self._speech_head_w is None:
+                self._speech_head_w = weight[mx.array(self.speech_token_ids)].astype(
+                    mx.float32
+                )
+            weight = self._speech_head_w
+        return (h.astype(mx.float32) @ weight.astype(mx.float32).T).astype(h.dtype)
+
+    def select_token(
+        self, h: mx.array, *, speech_only: bool = False, stop_boost: float = 0.0
+    ) -> int:
+        """Greedy selection for one hidden state, optionally boosting speech stops."""
+        logits = self.logits(h, speech_only=speech_only)
+        if speech_only:
+            # The former full-vocabulary mask promoted scores to float32 before
+            # silence boosts. Preserve that rounding behavior after projection.
+            logits = logits.astype(mx.float32)
+            if stop_boost:
+                for index in self._stop_indices:
+                    logits[0, 0, index] += stop_boost
+        index = int(mx.argmax(logits[0, 0]).item())
+        return self.speech_token_ids[index] if speech_only else index
 
     def prefill(
         self, embeds: mx.array, cos: mx.array, sin: mx.array,
