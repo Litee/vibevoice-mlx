@@ -8,6 +8,7 @@ import mlx.core as mx
 import numpy as np
 import pytest
 
+from vibevoice_mlx.fast_forward import FastLM
 from vibevoice_mlx.model import VAEDecoder
 from vibevoice_mlx.streaming_vae import DEPTHS, RATIOS
 
@@ -53,17 +54,19 @@ def tiny_decoder() -> VAEDecoder:
     return vae
 
 
-class FakeLM:
+class FakeLM(FastLM):
     def __init__(self, tokens: list[int]):
         self.tokens = iter(tokens)
         self.embed_w = mx.zeros((4, 2), dtype=mx.float16)
+        self.speech_token_ids = (0, 1, 2, 3)
+        self._stop_indices = (1, 3)
 
     def prefill(self, *args: object) -> mx.array:
         return mx.zeros((1, 1, 2), dtype=mx.float16)
 
     forward = prefill
 
-    def logits(self, hidden: mx.array) -> mx.array:
+    def logits(self, hidden: mx.array, *, speech_only: bool = False) -> mx.array:
         logits = mx.full((1, 1, 4), -10.0)
         logits[0, 0, next(self.tokens)] = 10.0
         return logits

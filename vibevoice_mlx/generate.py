@@ -357,19 +357,8 @@ def generate(
     # VibeVoiceTokenConstraintProcessor behavior (valid_tokens = speech_start,
     # speech_end, speech_diffusion, eos). The speaker labels are in the input,
     # not the output — the model only generates speech tokens.
-    allowed_tokens = mx.array([
-        config.speech_start_id, config.speech_end_id,
-        config.speech_diffusion_id, config.eos_id,
-    ])
-    logit_mask = mx.full((1, 1, config.vocab_size), float("-inf"), dtype=mx.float32)
-    logit_mask[0, 0, allowed_tokens] = 0.0
-
     # First token
-    logits = fast_lm.logits(hidden)
-    if logit_mask is not None:
-        logits = logits + logit_mask
-    mx.eval(logits)
-    next_token = int(mx.argmax(logits[0, 0]).item())
+    next_token = fast_lm.select_token(hidden, speech_only=True)
 
     # Semantic feedback must hear the same continuous audio we return. Keep
     # causal decoder history for this invocation, including across speech_end
@@ -473,9 +462,7 @@ def generate(
         else:
             hidden = fast_lm.forward(next_embed, cos, sin, cache)
 
-        logits = fast_lm.logits(hidden)
-        if logit_mask is not None:
-            logits = logits + logit_mask
+        boost = 0.0
         # Silence-aware stop: boost speech_end when generating silence
         if opts.silence_detection and config.single_segment and all_latents:
             lat_rms = float(mx.sqrt(mx.mean(all_latents[-1] ** 2)))
@@ -485,10 +472,7 @@ def generate(
                 silent_run = 0
             if silent_run >= 3:
                 boost = min((silent_run - 2) * 5.0, 20.0)
-                logits[0, 0, config.speech_end_id] += boost
-                logits[0, 0, config.eos_id] += boost
-        mx.eval(logits)
-        next_token = int(mx.argmax(logits[0, 0]).item())
+        next_token = fast_lm.select_token(hidden, speech_only=True, stop_boost=boost)
         metrics.record("lm_step", (time.perf_counter() - t0) * 1000)
         position += 1
 
