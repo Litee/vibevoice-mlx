@@ -120,6 +120,8 @@ def test_options_reach_warmup_generation_and_report(
 @pytest.mark.parametrize(
     "extra,error",
     [
+        (["--tokens", "0"], "--tokens must be a positive integer"),
+        (["--tokens", "-1"], "--tokens must be a positive integer"),
         (["--solver", "ddpm"], "invalid choice"),
         (["--diffusion-steps", "0"], "diffusion steps must"),
         (["--diffusion-steps", "1000"], "diffusion steps must"),
@@ -162,6 +164,33 @@ def test_report_proves_consumed_segment_transition(
             }
         ],
     }
+
+
+def test_empty_generation_saves_diagnostics_before_failing(
+    run_podcast: Callable[[list[str]], subprocess.CompletedProcess[str]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PODCAST_SELECTIONS", "[4]")  # Immediate EOS, no audio.
+    result = run_podcast([])
+
+    assert result.returncode != 0
+    assert "Generated 0.00s, expected 0.27s" in result.stderr
+    report = json.loads((tmp_path / "audio.json").read_text())
+    assert report["audio_seconds"] == 0
+    assert report["audio_seconds_per_wall_second"] == 0
+    assert report["wall_seconds_per_audio_second"] is None
+    assert report["peak_amplitude"] is None
+    assert report["finite"] is True
+    assert report["out_of_pcm_range_samples"] == 0
+    assert report["metrics"]["speech_tokens"] == 0
+    assert report["max_speech_tokens"] == 2
+    assert report["segment_trace"] == {
+        "consumed_diffusion_tokens": 0,
+        "controls": [],
+        "end_start_diffusion_transitions": [],
+    }
+    assert '"name": "restored", "value": true' in result.stdout
 
 
 @pytest.mark.parametrize(

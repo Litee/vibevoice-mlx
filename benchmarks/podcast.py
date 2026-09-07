@@ -43,6 +43,8 @@ def main() -> None:
     parser.add_argument("--cfg-scale", type=float, default=1.3)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
+    if args.tokens <= 0:
+        parser.error("--tokens must be a positive integer")
     try:
         _validate_diffusion_steps(args.diffusion_steps)
         _validate_cfg_scale(args.cfg_scale)
@@ -185,12 +187,12 @@ def main() -> None:
         "generation_seconds": seconds,
         "audio_seconds": duration,
         "audio_seconds_per_wall_second": duration / seconds,
-        "wall_seconds_per_audio_second": seconds / duration,
+        "wall_seconds_per_audio_second": seconds / duration if duration else None,
         "mlx_peak_memory_gib": mx.get_peak_memory() / 2**30,
         "process_peak_rss_gib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         / 2**30,
         "finite": bool(np.isfinite(audio).all()),
-        "peak_amplitude": float(np.max(np.abs(audio))),
+        "peak_amplitude": float(np.max(np.abs(audio))) if len(audio) else None,
         "out_of_pcm_range_samples": int(np.count_nonzero(np.abs(audio) >= 1)),
         "metrics": metrics.summary(),
     }
