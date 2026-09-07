@@ -260,6 +260,12 @@ def tokenize_text(
         for line, label in zip(lines, speaker_labels, strict=True):
             if label:
                 speaker_id = int(label.group(1)) - speaker_offset
+                if not 0 <= speaker_id < len(voice_refs):
+                    raise ValueError(
+                        f"Speaker {label.group(1)} maps to voice index {speaker_id}, "
+                        f"but only {len(voice_refs)} reference voices were provided "
+                        f"(valid voice indices: 0–{len(voice_refs) - 1})."
+                    )
                 line = f"Speaker {speaker_id}{line[label.end():]}"
             elif config.single_segment:
                 line = f"Speaker 0: {line}"
