@@ -255,6 +255,22 @@ def _quantize_predicate(_, m):
     )
 
 
+def _resolve_quantize_bits(
+    config: VibeVoiceConfig, quantize_bits: int | None
+) -> int | None:
+    """Preserve packed checkpoints; differing-bit requantization is unsupported."""
+    if config.quantization is None or quantize_bits is None:
+        return quantize_bits
+    source_bits = config.quantization["bits"]
+    if quantize_bits != source_bits:
+        raise ValueError(
+            f"Checkpoint is already INT{source_bits}; conversion to INT{quantize_bits} "
+            "is unsupported. Omit the quantization override to preserve it, "
+            "or use full-precision source weights."
+        )
+    return None
+
+
 def load_model(
     model_id: str,
     quantize_bits: Optional[int] = None,
@@ -276,6 +292,7 @@ def load_model(
     logger.info("Loading model from %s...", model_id)
     model_path = resolve_model_path(model_id)
     config = load_config(model_path)
+    quantize_bits = _resolve_quantize_bits(config, quantize_bits)
 
     logger.info("  Config: %d layers, hidden=%d, heads=%d, tie_embeddings=%s",
                 config.num_hidden_layers, config.hidden_size,
