@@ -26,7 +26,7 @@ import numpy as np
 
 import mlx.core as mx
 
-from .generate import GenerationOptions, generate
+from .generate import GenerationOptions, _validate_cfg_scale, generate
 from .load_weights import load_model, resolve_model_path
 from .model import VibeVoiceConfig, VibeVoiceModel
 
@@ -481,7 +481,7 @@ def main():
     parser.add_argument("--diffusion-steps", type=int, default=10,
                         help="Number of diffusion steps")
     parser.add_argument("--cfg-scale", type=float, default=1.3,
-                        help="Classifier-free guidance scale")
+                        help="Finite classifier-free guidance scale")
     parser.add_argument("--max-speech-tokens", type=int, default=200,
                         help="Maximum speech tokens to generate")
     parser.add_argument("--silence-detection", action="store_true",
@@ -506,6 +506,10 @@ def main():
     parser.add_argument("--tokenizer", type=str, default=None,
                         help="Tokenizer name (auto-detected if not specified)")
     args = parser.parse_args()
+    try:
+        _validate_cfg_scale(args.cfg_scale)
+    except ValueError as error:
+        parser.error(str(error))
 
     # Encode-only mode: --ref-audio + --save-voice without --text
     if args.save_voice and args.ref_audio and not args.text:

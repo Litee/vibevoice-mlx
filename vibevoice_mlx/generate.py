@@ -91,6 +91,20 @@ class GenerationMetrics:
 # DPM-Solver++ 2M — ODE and SDE variants (all MLX, batched CFG)
 # ---------------------------------------------------------------------------
 
+def _validate_cfg_scale(cfg_scale: float) -> None:
+    """Reject non-finite guidance without coercing valid scalar values."""
+    try:
+        finite = isinstance(
+            cfg_scale, (int, float, np.integer, np.floating, np.bool_)
+        ) and np.isfinite(cfg_scale)
+    except TypeError:
+        finite = False
+    if not finite:
+        raise ValueError(
+            f"cfg_scale must be a finite real number; received {cfg_scale!r}."
+        )
+
+
 def _dpm_denoise_step(diff_head, sample, batched_cond, s, cfg_scale, dtype):
     """Run diffusion head with batched CFG, return x0 prediction.
 
@@ -123,6 +137,7 @@ def dpm_solver_2m(
 
     Returns sample of shape (1, VAE_DIM) in float32.
     """
+    _validate_cfg_scale(cfg_scale)
     t_schedule = np.round(np.linspace(DDPM_STEPS - 1, 0, num_steps + 1)).astype(np.int64)
 
     key = mx.random.key(seed)
@@ -187,6 +202,7 @@ def dpm_solver_sde_2m(
     Returns sample of shape (1, VAE_DIM) in float32.
     """
     # Timestep schedule: N timesteps from 999→~50 (matching diffusers linspace)
+    _validate_cfg_scale(cfg_scale)
     timesteps = np.round(
         np.linspace(0, DDPM_STEPS - 1, num_steps + 1)
     ).astype(np.int64)[::-1][:-1]  # (num_steps,) from high to low
@@ -288,6 +304,7 @@ def generate(
     solver_fn = {"dpm": dpm_solver_2m, "sde": dpm_solver_sde_2m}.get(opts.solver)
     if solver_fn is None:
         raise ValueError(f"Unsupported solver {opts.solver!r}; choose 'dpm' or 'sde'.")
+    _validate_cfg_scale(opts.cfg_scale)
 
     config = model.config
     dtype = mx.float16
