@@ -36,7 +36,7 @@ class StreamingVAEDecoder:
         self.caches = {}
         self._build_caches()
 
-    def _build_caches(self):
+    def _build_caches(self) -> None:
         """Initialize zero cache buffers for all conv layers."""
         dtype = mx.float16
         vae = self.vae
@@ -57,7 +57,10 @@ class StreamingVAEDecoder:
         for s in range(len(RATIOS)):
             w, b, stride = vae.upsample_convs[s]
             C_in = w.shape[0]  # ConvTranspose: (C_in, C_out, K) in PyTorch layout
-            ctx = w.shape[-1] - stride  # kernel - stride
+            # An input d frames before the boundary can overlap new output
+            # only when d * stride <= kernel - 1. Count input frames here;
+            # kernel - stride is the separate output-sample right trim.
+            ctx = (w.shape[-1] - 1) // stride
             self.caches[f"up{s}"] = mx.zeros((1, C_in, ctx), dtype=dtype)
 
             for bi in range(DEPTHS[s + 1]):
