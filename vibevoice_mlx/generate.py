@@ -343,17 +343,12 @@ def generate(
 
     use_evolving_cfg = opts.cfg_scale > 1.0
 
-    # Initialize negative (unconditional) branch for CFG.
+    # The negative branch consumes the previous input only when diffusion runs.
     # Only allocate when CFG is active to save memory.
     if use_evolving_cfg:
-        neg_embed = embed_table[config.speech_start_id].reshape(1, 1, config.hidden_size)
-        neg_pos = mx.arange(1, dtype=mx.float32)
-        neg_cos, neg_sin = compute_rope(neg_pos, config.head_dim, config.rope_theta)
+        pending_neg_embed = embed_table[config.speech_start_id].reshape(1, 1, config.hidden_size)
         neg_cache = KVCache(NL)
-        neg_hidden = fast_lm.forward(neg_embed, neg_cos, neg_sin, neg_cache)
-        mx.eval(neg_hidden, *neg_cache.keys, *neg_cache.values)
-        neg_condition = neg_hidden[:, 0:1, :].reshape(1, config.hidden_size)
-        neg_position = 1
+        neg_position = 0
     else:
         # Static zero condition for CFG=1.0 (no guidance)
         neg_condition = mx.zeros((1, config.hidden_size), dtype=dtype)
@@ -429,11 +424,22 @@ def generate(
         if metrics.num_speech_tokens >= opts.max_speech_tokens:
             break
 
+        negative_lm_ms = 0.0
         if next_token == config.speech_diffusion_id:
             metrics.num_speech_tokens += 1
 
             # Update progress bar
             pbar.update(1)
+
+            if use_evolving_cfg:
+                t0 = time.perf_counter()
+                neg_pos = mx.array([float(neg_position)], dtype=mx.float32)
+                neg_cos, neg_sin = compute_rope(neg_pos, config.head_dim, config.rope_theta)
+                neg_hidden = fast_lm.forward(pending_neg_embed, neg_cos, neg_sin, neg_cache)
+                mx.eval(neg_hidden, *neg_cache.keys, *neg_cache.values)
+                neg_condition = neg_hidden[:, 0:1, :].reshape(1, config.hidden_size)
+                neg_position += 1
+                negative_lm_ms = (time.perf_counter() - t0) * 1000
 
             # Diffusion (fast path — no nn.Module dispatch)
             t0 = time.perf_counter()
@@ -479,28 +485,19 @@ def generate(
                 semantic_reset_fn()
             next_embed = embed_table[next_token].reshape(1, 1, config.hidden_size)
 
-        # LM step (+ neg branch if evolving CFG)
+        # Positive LM history includes every generated control/audio embedding.
         t0 = time.perf_counter()
         pos = mx.array([float(position)], dtype=mx.float32)
         cos, sin = compute_rope(pos, config.head_dim, config.rope_theta)
 
         if use_evolving_cfg and next_token == config.speech_start_id:
-            # Each segment's unconditional context starts at speech_start.
+            # Discard previous segment history when a new segment starts.
             neg_cache.reset()
             neg_position = 0
 
         if use_evolving_cfg:
-            # Batched: read weights once for both main+neg passes
-            neg_pos = mx.array([float(neg_position)], dtype=mx.float32)
-            neg_cos, neg_sin = compute_rope(neg_pos, config.head_dim, config.rope_theta)
-            hidden, neg_hidden = fast_lm.forward_dual(
-                next_embed, cos, sin, cache,
-                next_embed, neg_cos, neg_sin, neg_cache,
-            )
-            neg_condition = neg_hidden[:, 0:1, :].reshape(1, config.hidden_size)
-            neg_position += 1
-        else:
-            hidden = fast_lm.forward(next_embed, cos, sin, cache)
+            pending_neg_embed = next_embed
+        hidden = fast_lm.forward(next_embed, cos, sin, cache)
 
         boost = 0.0
         # Silence-aware stop: boost speech_end when generating silence
@@ -513,7 +510,7 @@ def generate(
             if silent_run >= 3:
                 boost = min((silent_run - 2) * 5.0, 20.0)
         next_token = fast_lm.select_token(hidden, speech_only=True, stop_boost=boost)
-        metrics.record("lm_step", (time.perf_counter() - t0) * 1000)
+        metrics.record("lm_step", (time.perf_counter() - t0) * 1000 + negative_lm_ms)
         position += 1
 
         # Free MLX Metal buffer pool every 10 steps to prevent unbounded growth.
