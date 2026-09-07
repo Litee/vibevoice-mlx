@@ -196,6 +196,7 @@ def _write_converted_bundle(
         "speech_end_id": config.speech_end_id,
         "speech_diffusion_id": config.speech_diffusion_id,
         "eos_id": config.eos_id,
+        "single_segment": config.single_segment,
     }
     if quantization_meta is not None:
         config_dict["quantization"] = quantization_meta
