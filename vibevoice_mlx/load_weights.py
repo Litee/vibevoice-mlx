@@ -137,15 +137,16 @@ def _map_hf_key(name: str) -> str | None:
     return None
 
 
-def _map_mlx_vae_weights(raw: dict[str, mx.array]) -> dict[str, mx.array]:
-    """Extract and organize VAE decoder weights into the format expected by VAEDecoder."""
+def _map_mlx_vae_weights(
+    raw: dict[str, mx.array], checkpoint_prefix: str = "vae_decoder."
+) -> dict[str, mx.array | int]:
+    """Validate and organize the complete decoder, naming original missing keys."""
     p = "vae_decoder."
-    result = {}
+    key_map = {}
 
     # Init conv
-    if p + "upsample_layers.0.0.conv.conv.weight" in raw:
-        result["init_conv_w"] = raw[p + "upsample_layers.0.0.conv.conv.weight"]
-        result["init_conv_b"] = raw[p + "upsample_layers.0.0.conv.conv.bias"]
+    key_map["init_conv_w"] = p + "upsample_layers.0.0.conv.conv.weight"
+    key_map["init_conv_b"] = p + "upsample_layers.0.0.conv.conv.bias"
 
     # Stages
     depths = [8, 3, 3, 3, 3, 3, 3]
@@ -165,26 +166,34 @@ def _map_mlx_vae_weights(raw: dict[str, mx.array]) -> dict[str, mx.array]:
                 ("ffn.linear2.bias", "ffn_l2_b"),
                 ("ffn_gamma", "ffn_gamma"),
             ]:
-                full_key = bp + key_suffix
-                if full_key in raw:
-                    result[prefix + result_key] = raw[full_key]
+                key_map[prefix + result_key] = bp + key_suffix
 
     # Upsample convs
     ratios = [8, 5, 5, 4, 2, 2]
     for i in range(1, 7):
         up = f"{p}upsample_layers.{i}.0.convtr.convtr."
-        if up + "weight" in raw:
-            result[f"upsample_{i}_w"] = raw[up + "weight"]
-            result[f"upsample_{i}_b"] = raw[up + "bias"]
-            result[f"upsample_{i}_stride"] = ratios[i - 1]
+        key_map[f"upsample_{i}_w"] = up + "weight"
+        key_map[f"upsample_{i}_b"] = up + "bias"
 
     # Head conv
-    if p + "head.conv.conv.weight" in raw:
-        result["head_w"] = raw[p + "head.conv.conv.weight"]
-        result["head_b"] = raw[p + "head.conv.conv.bias"]
+    key_map["head_w"] = p + "head.conv.conv.weight"
+    key_map["head_b"] = p + "head.conv.conv.bias"
+
+    missing = [
+        checkpoint_prefix + key[len(p) :] for key in key_map.values() if key not in raw
+    ]
+    if missing:
+        raise ValueError(
+            "Incomplete VAE decoder checkpoint; missing keys: " + ", ".join(missing)
+        )
+
+    result: dict[str, mx.array | int] = {
+        name: raw[key] for name, key in key_map.items()
+    }
+    for i, stride in enumerate(ratios, start=1):
+        result[f"upsample_{i}_stride"] = stride
 
     return result
-
 
 def _quantize_predicate(_, m):
     """Quantize nn.Linear layers with dimensions divisible by 64."""
@@ -248,14 +257,17 @@ def load_model(
     else:
         logger.warning("  Unknown weight format, attempting direct load")
 
-    # Create model
-    model = VibeVoiceModel(config)
-
     # Extract VAE decoder weights before discarding non-model weights
     vae_keys = [k for k in raw_weights if k.startswith("vae_decoder.")]
     vae_raw = {k: raw_weights[k] for k in vae_keys}
-    vae_data = _map_mlx_vae_weights(vae_raw) if vae_keys else {}
+    checkpoint_prefix = (
+        "model.acoustic_tokenizer.decoder." if is_hf_format else "vae_decoder."
+    )
+    vae_data = _map_mlx_vae_weights(vae_raw, checkpoint_prefix)
     del vae_raw
+
+    # Create model only after validating the manually loaded decoder.
+    model = VibeVoiceModel(config)
 
     # Extract acoustic encoder weights (for voice cloning) before discarding.
     # Stored on model._encoder_weights so encode_voice_reference() can skip
