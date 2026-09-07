@@ -22,7 +22,7 @@ import mlx.nn as nn
 from mlx.utils import tree_flatten
 
 from vibevoice_mlx.load_weights import (
-    _load_safetensors, _map_hf_key, _quantize_predicate,
+    _load_safetensors, _map_hf_key, _quantize_predicate, _resolve_quantize_bits,
     load_config, resolve_model_path,
 )
 from vibevoice_mlx.model import VibeVoiceConfig, VibeVoiceModel
@@ -61,6 +61,7 @@ def convert_model(model_id: str, output_dir: Path, tokenizer_id: str | None = No
 
     model_path = resolve_model_path(model_id)
     config = load_config(model_path)
+    quantize_bits = _resolve_quantize_bits(config, quantize_bits)
     for path in output_dir.glob("*.safetensors"):
         if not _CHECKPOINT_NAME.fullmatch(path.name):
             raise ValueError(f"Output directory contains unrelated checkpoint file: {path}")
