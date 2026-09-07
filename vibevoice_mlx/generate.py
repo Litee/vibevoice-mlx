@@ -26,7 +26,10 @@ DDPM_STEPS = 1000
 VAE_DIM = 64
 
 _AC64 = np.cos((np.arange(DDPM_STEPS + 1, dtype=np.float64) / DDPM_STEPS + 0.008) / 1.008 * np.pi / 2) ** 2
-_AC64 = (_AC64 / _AC64[0])[:DDPM_STEPS]
+# Discretize cosine intervals before taking the cumulative product. The beta
+# cap keeps the final training timestep at finite, nonzero signal strength.
+_BETAS_NP = np.minimum(1.0 - _AC64[1:] / _AC64[:-1], 0.999)
+_AC64 = np.cumprod(1.0 - _BETAS_NP)
 _ALPHA_NP = np.sqrt(_AC64)
 _SIGMA_NP = np.sqrt(1.0 - _AC64)
 _LAMBDA_NP = np.log(_ALPHA_NP / np.maximum(_SIGMA_NP, 1e-10))
@@ -153,7 +156,9 @@ def dpm_solver_2m(
     """
     _validate_cfg_scale(cfg_scale)
     num_steps = _validate_diffusion_steps(num_steps)
-    t_schedule = np.round(np.linspace(DDPM_STEPS - 1, 0, num_steps + 1)).astype(np.int64)
+    t_schedule = np.round(
+        np.linspace(0, DDPM_STEPS - 1, num_steps + 1)
+    ).astype(np.int64)[::-1]
 
     key = mx.random.key(seed)
     sample = mx.random.normal(shape=(1, VAE_DIM), key=key).astype(mx.float32)
@@ -169,6 +174,10 @@ def dpm_solver_2m(
         t = int(t_schedule[i + 1])
 
         x0 = _dpm_denoise_step(diff_head, sample, batched_cond, s, cfg_scale, dtype)
+        # The inference endpoint is zero noise, distinct from training index 0.
+        # Its first-order update returns the latest clean prediction exactly.
+        if i == num_steps - 1:
+            return x0
         x0_list.append(x0)
 
         sigma_s = float(_SIGMA_NP[s])
@@ -176,11 +185,9 @@ def dpm_solver_2m(
         lam_t = float(_LAMBDA_NP[max(t, 0)])
         h = lam_t - lam_s
 
-        is_last = (i == num_steps - 1)
-        # The final target has zero noise, so use the latest clean prediction
-        # without second-order extrapolation, regardless of the step count.
-        # The penultimate update remains second-order, even for short schedules.
-        use_first_order = len(x0_list) < 2 or is_last
+        # All updates after the initial one remain second-order, including
+        # the penultimate update for short schedules.
+        use_first_order = len(x0_list) < 2
 
         if use_first_order:
             D = x0_list[-1]
