@@ -250,17 +250,17 @@ def tokenize_text(
                 cached_embeds=cached,
             ))
 
-        # Text section — normalize speaker IDs from 1-based (user) to 0-based (model)
+        # Shift one-based labels only when every explicit speaker ID is positive.
         text_section = tokenizer.encode(" Text input:\n", add_special_tokens=False)
-        lines = text.strip().split("\n")
+        lines = [line.strip() for line in text.strip().split("\n")]
+        speaker_labels = [re.match(r"^Speaker\s+(\d+)(?=\s*:)", line) for line in lines]
+        speaker_ids = [int(label.group(1)) for label in speaker_labels if label]
+        speaker_offset = 1 if speaker_ids and min(speaker_ids) > 0 else 0
         speaker_tokens_list = []
-        for line in lines:
-            line = line.strip()
-            def _decrement_speaker(m):
-                n = int(m.group(1))
-                return f"Speaker {max(0, n - 1)}"
-            if re.match(r"Speaker\s+\d+", line):
-                line = re.sub(r"Speaker\s+(\d+)", _decrement_speaker, line)
+        for line, label in zip(lines, speaker_labels, strict=True):
+            if label:
+                speaker_id = int(label.group(1)) - speaker_offset
+                line = f"Speaker {speaker_id}{line[label.end():]}"
             elif config.single_segment:
                 line = f"Speaker 0: {line}"
             speaker_tokens_list += tokenizer.encode(f" {line}\n", add_special_tokens=False)
