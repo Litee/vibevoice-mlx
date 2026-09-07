@@ -147,12 +147,10 @@ def dpm_solver_2m(
         h = lam_t - lam_s
 
         is_last = (i == num_steps - 1)
-        is_second_last = (i == num_steps - 2)
         # The final target has zero noise, so use the latest clean prediction
         # without second-order extrapolation, regardless of the step count.
-        lower_order_final = is_last
-        lower_order_second = is_second_last and num_steps < 15
-        use_first_order = len(x0_list) < 2 or lower_order_final or lower_order_second
+        # The penultimate update remains second-order, even for short schedules.
+        use_first_order = len(x0_list) < 2 or is_last
 
         if use_first_order:
             D = x0_list[-1]
