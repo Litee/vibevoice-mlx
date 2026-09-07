@@ -203,7 +203,6 @@ def tokenize_text(
     ref_audio: list[str] | None = None,
     tokenizer=None,
     speaker_embeds: list[tuple[int, np.ndarray]] | None = None,
-    trust_remote_code: bool = False,
 ) -> list[int] | VoiceCloneData:
     """Build the full prompt token sequence for TTS.
 
@@ -214,14 +213,10 @@ def tokenize_text(
         speaker_embeds: Pre-encoded embeddings as list of (num_tokens, embeds)
             where embeds is shape (num_tokens, hidden_size). Alternative to
             ref_audio for batch synthesis with pre-encoded voices.
-        trust_remote_code: Allow the tokenizer repository's Python code to run.
-            Ignored when a tokenizer instance is provided.
     """
     if tokenizer is None:
         from transformers import AutoTokenizer
-        tokenizer = AutoTokenizer.from_pretrained(
-            tokenizer_name, trust_remote_code=trust_remote_code
-        )
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, trust_remote_code=False)
 
     system_prompt = " Transform the text provided by various speakers into speech output, utilizing the distinct voice of each respective speaker.\n"
     system_tokens = tokenizer.encode(system_prompt)
@@ -492,7 +487,7 @@ def _detect_tokenizer(model_id: str, config) -> str:
     return "Qwen/Qwen2.5-7B"
 
 
-def main() -> None:
+def main():
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
     parser = argparse.ArgumentParser(description="VibeVoice MLX Text-to-Speech")
@@ -539,8 +534,6 @@ def main() -> None:
                         help="Use CoreML CPU + Neural Engine semantic encoder (opt-in; benchmark on your device)")
     parser.add_argument("--tokenizer", type=str, default=None,
                         help="Tokenizer name (auto-detected if not specified)")
-    parser.add_argument("--trust-remote-code", action="store_true",
-                        help="Allow the tokenizer repository's Python code to run (only for trusted sources)")
     args = parser.parse_args()
     try:
         _validate_cfg_scale(args.cfg_scale)
@@ -592,10 +585,7 @@ def main() -> None:
 
     # Determine voice source: --voice (pre-encoded) or --ref-audio (encode now)
     voice_files = args.voice or args.ref_audio
-    result = tokenize_text(
-        text, tokenizer_name, config, ref_audio=voice_files,
-        trust_remote_code=args.trust_remote_code,
-    )
+    result = tokenize_text(text, tokenizer_name, config, ref_audio=voice_files)
 
     # Handle voice cloning vs simple text
     voice_embeds = None

@@ -118,12 +118,7 @@ Text ──→ Qwen2.5 LLM backbone ──→ control tokens
 --coreml-semantic        Use CoreML CPU/GPU semantic encoder
 --ane-semantic           Use CoreML CPU/Neural Engine semantic encoder (opt-in)
 --tokenizer MODEL        Override tokenizer (default: bundled)
---trust-remote-code      Allow custom tokenizer Python code (disabled by default)
 ```
-
-Inference and `convert.py` require `--trust-remote-code` for tokenizers that run
-repository-supplied Python code. Enable it only for sources you trust. Python API
-callers can opt in with `trust_remote_code=True` in `tokenize_text` or `convert_model`.
 
 ## Optimizations
 
