@@ -182,7 +182,7 @@ def test_generation_matches_deferred_negative_context(
         assert len(metrics.timings["diffusion"]) == speech_tokens
         assert len(metrics.timings["lm_step"]) == len(tokens) - 1
         assert audio.shape == (3200 * speech_tokens,)
-        assert resets == [True] * speech_ends
+        assert resets == [True] * (speech_ends + int(semantic))
         np.testing.assert_allclose(audio, expected, atol=2e-5, rtol=2e-3)
         if semantic:
             np.testing.assert_array_equal(np.concatenate(chunks), audio)

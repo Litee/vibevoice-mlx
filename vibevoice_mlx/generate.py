@@ -363,6 +363,10 @@ def generate(
     embed_table = fast_lm.embed_w
     NL = config.num_hidden_layers
 
+    # Each invocation owns independent recurrent state, including semantic history.
+    if semantic_encoder_fn is not None and semantic_reset_fn is not None:
+        semantic_reset_fn()
+
     use_evolving_cfg = opts.cfg_scale > 1.0
     prepared_neg_hidden = None
 
