@@ -211,9 +211,8 @@ def tokenize_text(
 
     Args:
         speaker_embeds: Pre-encoded embeddings as list of (num_tokens, embeds)
-            where embeds is a finite real numeric NumPy array of nonempty shape
-            (num_tokens, hidden_size), with a matching positive integer count.
-            Alternative to ref_audio for batch synthesis with pre-encoded voices.
+            where embeds is shape (num_tokens, hidden_size). Alternative to
+            ref_audio for batch synthesis with pre-encoded voices.
     """
     if tokenizer is None:
         from transformers import AutoTokenizer
