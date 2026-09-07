@@ -1,10 +1,43 @@
 """Voice-cloning prompts preserve speaker identities and dialogue text."""
 
+from pathlib import Path
+
 import numpy as np
 import pytest
+import soundfile as sf
 
 from vibevoice_mlx.e2e_pipeline import VoiceCloneData, tokenize_text
 from vibevoice_mlx.model import VibeVoiceConfig
+
+
+@pytest.mark.parametrize("single_segment", [False, True])
+@pytest.mark.parametrize("file_references", [False, True])
+@pytest.mark.parametrize(
+    ("script", "missing"),
+    [
+        ("Speaker 0: Hello\nSpeaker 1: Hi\nSpeaker 2: Goodbye", 2),
+        ("Speaker 1: Hello\nSpeaker 2: Hi\nSpeaker 3: Goodbye", 3),
+        ("Speaker 0: Hello\nSpeaker 2: Goodbye", 2),
+    ],
+)
+def test_speaker_without_reference_is_rejected(
+    script: str,
+    missing: int,
+    single_segment: bool,
+    file_references: bool,
+    tmp_path: Path,
+) -> None:
+    audio_path = tmp_path / "voice.wav"
+    sf.write(audio_path, np.zeros(3200), 24000)
+    with pytest.raises(ValueError, match=rf"Speaker {missing}.*2 reference voices"):
+        tokenize_text(
+            script,
+            "unused",
+            VibeVoiceConfig(single_segment=single_segment),
+            tokenizer=RecordingTokenizer(),
+            ref_audio=[str(audio_path)] * 2 if file_references else None,
+            speaker_embeds=None if file_references else [(1, np.zeros((1, 3)))] * 2,
+        )
 
 
 class RecordingTokenizer:
@@ -22,7 +55,7 @@ class RecordingTokenizer:
         ("Speaker 0: Hello\nSpeaker 1: Hi", " Speaker 0: Hello\n Speaker 1: Hi\n"),
         ("Speaker 1: Hi\nSpeaker 0: Hello", " Speaker 1: Hi\n Speaker 0: Hello\n"),
         ("Speaker 1: Hello\nSpeaker 2: Hi", " Speaker 0: Hello\n Speaker 1: Hi\n"),
-        ("Speaker 2: Hello\nSpeaker 3: Hi", " Speaker 1: Hello\n Speaker 2: Hi\n"),
+        ("Speaker 2: Hello", " Speaker 1: Hello\n"),
         (
             "Speaker 1: Ask Speaker 2: are you ready?\nSpeaker 2: Yes",
             " Speaker 0: Ask Speaker 2: are you ready?\n Speaker 1: Yes\n",
