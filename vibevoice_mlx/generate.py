@@ -105,6 +105,20 @@ def _validate_cfg_scale(cfg_scale: float) -> None:
         )
 
 
+def _validate_diffusion_steps(num_steps: int) -> int:
+    """Keep rounded training timesteps distinct before the zero-noise endpoint."""
+    if (
+        not isinstance(num_steps, (int, np.integer))
+        or isinstance(num_steps, bool)
+        or not 1 <= num_steps < DDPM_STEPS
+    ):
+        raise ValueError(
+            f"diffusion steps must be an integer between 1 and {DDPM_STEPS - 1}; "
+            f"received {num_steps!r}."
+        )
+    return int(num_steps)
+
+
 def _dpm_denoise_step(diff_head, sample, batched_cond, s, cfg_scale, dtype):
     """Run diffusion head with batched CFG, return x0 prediction.
 
@@ -138,6 +152,7 @@ def dpm_solver_2m(
     Returns sample of shape (1, VAE_DIM) in float32.
     """
     _validate_cfg_scale(cfg_scale)
+    num_steps = _validate_diffusion_steps(num_steps)
     t_schedule = np.round(np.linspace(DDPM_STEPS - 1, 0, num_steps + 1)).astype(np.int64)
 
     key = mx.random.key(seed)
@@ -203,6 +218,7 @@ def dpm_solver_sde_2m(
     """
     # Timestep schedule: N timesteps from 999→~50 (matching diffusers linspace)
     _validate_cfg_scale(cfg_scale)
+    num_steps = _validate_diffusion_steps(num_steps)
     timesteps = np.round(
         np.linspace(0, DDPM_STEPS - 1, num_steps + 1)
     ).astype(np.int64)[::-1][:-1]  # (num_steps,) from high to low
@@ -305,6 +321,7 @@ def generate(
     if solver_fn is None:
         raise ValueError(f"Unsupported solver {opts.solver!r}; choose 'dpm' or 'sde'.")
     _validate_cfg_scale(opts.cfg_scale)
+    diffusion_steps = _validate_diffusion_steps(opts.diffusion_steps)
 
     config = model.config
     dtype = mx.float16
@@ -423,7 +440,7 @@ def generate(
             condition = hidden[:, 0:1, :].reshape(1, config.hidden_size)
             sample = solver_fn(
                 fast_diff, condition, neg_condition, opts.cfg_scale,
-                num_steps=opts.diffusion_steps,
+                num_steps=diffusion_steps,
                 seed=rng.randint(0, 2**31),
                 dtype=dtype,
             )

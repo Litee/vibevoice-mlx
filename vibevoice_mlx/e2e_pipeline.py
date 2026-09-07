@@ -26,7 +26,7 @@ import numpy as np
 
 import mlx.core as mx
 
-from .generate import GenerationOptions, _validate_cfg_scale, generate
+from .generate import GenerationOptions, _validate_cfg_scale, _validate_diffusion_steps, generate
 from .load_weights import load_model, resolve_model_path
 from .model import VibeVoiceConfig, VibeVoiceModel
 
@@ -479,7 +479,7 @@ def main():
     parser.add_argument("--solver", type=str, default="dpm", choices=["dpm", "sde"],
                         help="Diffusion solver (sde=stochastic DPM-Solver++, dpm=ODE DPM-Solver++)")
     parser.add_argument("--diffusion-steps", type=int, default=10,
-                        help="Number of diffusion steps")
+                        help="Number of diffusion steps (1-999)")
     parser.add_argument("--cfg-scale", type=float, default=1.3,
                         help="Finite classifier-free guidance scale")
     parser.add_argument("--max-speech-tokens", type=int, default=200,
@@ -508,6 +508,7 @@ def main():
     args = parser.parse_args()
     try:
         _validate_cfg_scale(args.cfg_scale)
+        _validate_diffusion_steps(args.diffusion_steps)
     except ValueError as error:
         parser.error(str(error))
 
