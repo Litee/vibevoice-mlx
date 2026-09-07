@@ -9,6 +9,7 @@ from typing import Optional
 
 import mlx.core as mx
 import mlx.nn as nn
+from mlx.utils import tree_flatten
 
 from .model import VibeVoiceConfig, VibeVoiceModel
 
@@ -294,10 +295,23 @@ def load_model(
             model.model, bits=bits, group_size=group_size,
             class_predicate=_quantize_predicate,
         )
-        model.load_weights(weight_pairs, strict=False)
+        model.load_weights(weight_pairs)
         del weight_pairs
     elif quantize_bits is not None:
         logger.info("  Loading with INT%d quantization (per-layer eval)...", quantize_bits)
+        expected_shapes = {name: value.shape for name, value in tree_flatten(model.parameters())}
+        supplied_names = {name for name, _ in weight_pairs}
+        if extra := supplied_names - expected_shapes.keys():
+            raise ValueError(f"Parameters not in model: {', '.join(sorted(extra))}")
+        if missing := expected_shapes.keys() - supplied_names:
+            raise ValueError(f"Missing parameters: {', '.join(sorted(missing))}")
+        for name, value in weight_pairs:
+            if value.shape != expected_shapes[name]:
+                raise ValueError(
+                    f"Expected shape {expected_shapes[name]} but received "
+                    f"shape {value.shape} for parameter {name}"
+                )
+        del expected_shapes, supplied_names, value
         lm_layer_weights = {}
         other_weights = []
 
