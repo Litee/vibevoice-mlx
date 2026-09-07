@@ -39,16 +39,10 @@ CONFIGS = [
 ]
 
 
-def make_script(model, voice_arg, text, seed, max_tokens, audio_out,
-                quantize=None, no_semantic=False, coreml_semantic=False):
-    """Build inline Python script for subprocess execution."""
-    q = quantize if quantize else "None"
-    sem_mode = '"none"' if no_semantic else ('"coreml"' if coreml_semantic else '"mlx"')
-    audio_out_repr = repr(str(audio_out)) if audio_out else "None"
-    voice_repr = repr(str(voice_arg)) if voice_arg else "None"
-
-    return textwrap.dedent(f"""\
-import json, time, os
+def make_script() -> str:
+    """Build fixed worker source; user values arrive as a JSON argument."""
+    return textwrap.dedent("""\
+import json, time, os, sys
 os.environ["TRANSFORMERS_VERBOSITY"] = "error"
 import mlx.core as mx
 from vibevoice_mlx.load_weights import load_model
@@ -56,9 +50,11 @@ from vibevoice_mlx.generate import generate, GenerationOptions
 from vibevoice_mlx.e2e_pipeline import (tokenize_text, VoiceCloneData, SAMPLE_RATE,
                           _detect_tokenizer, load_voice, encode_voice_reference)
 
-model, config = load_model("{model}", quantize_bits={q})
+args = json.loads(sys.argv[1])
+model_id = args["model"]
+model, config = load_model(model_id, quantize_bits=args["quantize"])
 
-sem_mode = {sem_mode}
+sem_mode = args["sem_mode"]
 semantic_fn = None
 semantic_reset = None
 
@@ -72,27 +68,27 @@ if sem_mode == "coreml":
 
 if sem_mode == "mlx":
     from vibevoice_mlx.e2e_pipeline import _try_mlx_semantic
-    r = _try_mlx_semantic(model, config, "{model}")
+    r = _try_mlx_semantic(model, config, model_id)
     if r is not None:
         semantic_fn, semantic_reset = r
 
-tokenizer_name = _detect_tokenizer("{model}", config)
-voice_arg = {voice_repr}
+tokenizer_name = _detect_tokenizer(model_id, config)
+voice_arg = args["voice_arg"]
 voice_list = [voice_arg] if voice_arg else None
 
-text = {repr(text)}
+text = args["text"]
 result = tokenize_text(text, tokenizer_name, config, ref_audio=voice_list)
 
 voice_embeds = None
 if isinstance(result, VoiceCloneData):
     input_ids = result.input_ids
-    voice_embeds = {{}}
+    voice_embeds = {}
     for spk in result.speakers:
         if voice_arg and voice_arg.endswith(".safetensors"):
             spk.cached_embeds = load_voice(voice_arg)[:spk.num_vae_tokens]
         else:
             spk.cached_embeds = encode_voice_reference(
-                spk.ref_audio_np, spk.num_vae_tokens, model, config, "{model}")
+                spk.ref_audio_np, spk.num_vae_tokens, model, config, model_id)
         embeds_mx = mx.array(spk.cached_embeds).astype(mx.float16)
         for i, pos in enumerate(spk.speech_embed_positions):
             if i < embeds_mx.shape[0]:
@@ -104,8 +100,8 @@ opts = GenerationOptions(
     solver="dpm",
     diffusion_steps=10,
     cfg_scale=1.3,
-    max_speech_tokens={max_tokens},
-    seed={seed},
+    max_speech_tokens=args["max_tokens"],
+    seed=args["seed"],
 )
 
 mx.reset_peak_memory()
@@ -125,44 +121,54 @@ peak = mx.get_peak_memory() / 1e9
 audio_s = summary.get("audio_seconds", 0)
 rtf = audio_s / gen_s if gen_s > 0 else 0
 
-audio_out = {audio_out_repr}
+audio_out = args["audio_out"]
 if audio_out and len(audio) > 0:
     import soundfile as sf
     sf.write(audio_out, audio, SAMPLE_RATE)
 
-print("BENCH_RESULT:" + json.dumps({{
+print("BENCH_RESULT:" + json.dumps({
     "gen_s": gen_s,
     "audio_s": audio_s,
     "rtf": rtf,
     "peak_mem_gb": peak,
     "speech_tokens": metrics.num_speech_tokens,
-}}))
+}))
 """)
 
 
-def run_config(label, cfg, args, audio_dir=None):
+def run_config(
+    label: str,
+    cfg: dict[str, int | bool],
+    args: argparse.Namespace,
+    audio_dir: str | Path | None = None,
+) -> dict[str, float] | None:
     audio_out = None
     if audio_dir:
         safe = label.replace(", ", "_").replace(" ", "_")
         audio_out = Path(audio_dir) / f"{safe}.wav"
 
-    script = make_script(
-        model=args.model,
-        voice_arg=args.voice_arg,
-        text=args.text,
-        seed=args.seed,
-        max_tokens=args.max_tokens,
-        audio_out=audio_out,
-        **cfg,
-    )
+    payload = {
+        "model": str(args.model),
+        "voice_arg": str(args.voice_arg) if args.voice_arg else None,
+        "text": args.text,
+        "seed": args.seed,
+        "max_tokens": args.max_tokens,
+        "audio_out": str(audio_out) if audio_out else None,
+        "quantize": cfg.get("quantize") or None,
+        "sem_mode": "none"
+        if cfg.get("no_semantic")
+        else ("coreml" if cfg.get("coreml_semantic") else "mlx"),
+    }
     try:
         result = subprocess.run(
-            [sys.executable, "-c", script],
-            capture_output=True, text=True, timeout=600,
+            [sys.executable, "-c", make_script(), json.dumps(payload)],
+            capture_output=True,
+            text=True,
+            timeout=600,
         )
         for line in result.stdout.split("\n"):
             if line.startswith("BENCH_RESULT:"):
-                return json.loads(line[len("BENCH_RESULT:"):])
+                return json.loads(line[len("BENCH_RESULT:") :])
         print(f"FAILED")
         stderr = (result.stdout + result.stderr)[-500:]
         if stderr.strip():
@@ -173,27 +179,42 @@ def run_config(label, cfg, args, audio_dir=None):
     return None
 
 
-def pre_encode_voice(model_path, ref_audio, save_path):
+def pre_encode_voice(model_path: str, ref_audio: str, save_path: str) -> str | None:
     """Pre-encode voice in a subprocess, return path to saved embeddings."""
-    script = textwrap.dedent(f"""\
-import os
+    script = textwrap.dedent("""\
+import json, os, sys
 os.environ["TRANSFORMERS_VERBOSITY"] = "error"
 from vibevoice_mlx.load_weights import load_model
 from vibevoice_mlx.e2e_pipeline import encode_voice_reference, save_voice, SAMPLE_RATE, VOICE_CLONE_SAMPLES, SPEECH_TOK_COMPRESS_RATIO, _load_and_resample
 import math
 
-model, config = load_model("{model_path}", quantize_bits=None)
-wav = _load_and_resample("{ref_audio}")
+args = json.loads(sys.argv[1])
+model_path = args["model"]
+model, config = load_model(model_path, quantize_bits=None)
+wav = _load_and_resample(args["ref_audio"])
 if len(wav) > VOICE_CLONE_SAMPLES:
     wav = wav[:VOICE_CLONE_SAMPLES]
 num_vae_tokens = math.ceil(len(wav) / SPEECH_TOK_COMPRESS_RATIO)
-embeds = encode_voice_reference(wav, num_vae_tokens, model, config, "{model_path}")
-save_voice("{save_path}", embeds)
+embeds = encode_voice_reference(wav, num_vae_tokens, model, config, model_path)
+save_voice(args["save_path"], embeds)
 print("DONE")
 """)
     result = subprocess.run(
-        [sys.executable, "-c", script],
-        capture_output=True, text=True, timeout=300,
+        [
+            sys.executable,
+            "-c",
+            script,
+            json.dumps(
+                {
+                    "model": str(model_path),
+                    "ref_audio": str(ref_audio),
+                    "save_path": str(save_path),
+                }
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=300,
     )
     if "DONE" in result.stdout:
         return save_path
