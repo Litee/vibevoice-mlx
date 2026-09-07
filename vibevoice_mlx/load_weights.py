@@ -139,9 +139,9 @@ def _map_hf_key(name: str) -> str | None:
 
 
 def _map_mlx_vae_weights(
-    raw: dict[str, mx.array], checkpoint_prefix: str = "vae_decoder."
+    raw: dict[str, mx.array], vae_dim: int, checkpoint_prefix: str = "vae_decoder."
 ) -> dict[str, mx.array | int]:
-    """Validate and organize the complete decoder, naming original missing keys."""
+    """Validate and organize decoder tensors, naming original checkpoint keys."""
     p = "vae_decoder."
     key_map = {}
 
@@ -188,6 +188,55 @@ def _map_mlx_vae_weights(
             "Incomplete VAE decoder checkpoint; missing keys: " + ", ".join(missing)
         )
 
+    def check_shape(
+        name: str, expected: tuple[int | None, ...], min_kernel: int = 1
+    ) -> tuple[int, ...]:
+        key = key_map[name]
+        shape = raw[key].shape
+        if (
+            len(shape) != len(expected)
+            or any(size <= 0 for size in shape)
+            or any(
+                want is not None and size != want for size, want in zip(shape, expected)
+            )
+            or (len(expected) == 3 and shape[-1] < min_kernel)
+        ):
+            original_key = checkpoint_prefix + key[len(p) :]
+            requirement = str(expected).replace("None", "positive")
+            if len(expected) == 3:
+                requirement += f", kernel >= {min_kernel}"
+            raise ValueError(
+                f"Invalid VAE decoder shape for {original_key}: "
+                f"got {shape}, expected {requirement}"
+            )
+        return shape
+
+    channels = check_shape("init_conv_w", (None, vae_dim, None))[0]
+    check_shape("init_conv_b", (channels,))
+    for stage, depth in enumerate(depths):
+        if stage:
+            channels = check_shape(
+                f"upsample_{stage}_w", (channels, None, None), ratios[stage - 1]
+            )[1]
+            check_shape(f"upsample_{stage}_b", (channels,))
+        for block in range(depth):
+            prefix = f"stage_{stage}_block_{block}_"
+            check_shape(prefix + "conv_w", (channels, 1, None))
+            for name in (
+                "norm_w",
+                "conv_b",
+                "gamma",
+                "ffn_norm_w",
+                "ffn_l2_b",
+                "ffn_gamma",
+            ):
+                check_shape(prefix + name, (channels,))
+            ffn_width = check_shape(prefix + "ffn_l1_w", (None, channels))[0]
+            check_shape(prefix + "ffn_l1_b", (ffn_width,))
+            check_shape(prefix + "ffn_l2_w", (channels, ffn_width))
+    check_shape("head_w", (1, channels, None))
+    check_shape("head_b", (1,))
+
     result: dict[str, mx.array | int] = {
         name: raw[key] for name, key in key_map.items()
     }
@@ -195,6 +244,7 @@ def _map_mlx_vae_weights(
         result[f"upsample_{i}_stride"] = stride
 
     return result
+
 
 def _quantize_predicate(_, m):
     """Quantize nn.Linear layers with dimensions divisible by 64."""
@@ -264,7 +314,7 @@ def load_model(
     checkpoint_prefix = (
         "model.acoustic_tokenizer.decoder." if is_hf_format else "vae_decoder."
     )
-    vae_data = _map_mlx_vae_weights(vae_raw, checkpoint_prefix)
+    vae_data = _map_mlx_vae_weights(vae_raw, config.vae_dim, checkpoint_prefix)
     del vae_raw
 
     # Create model only after validating the manually loaded decoder.
