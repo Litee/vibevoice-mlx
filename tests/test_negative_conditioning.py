@@ -186,3 +186,27 @@ def test_generation_matches_deferred_negative_context(
         np.testing.assert_allclose(audio, expected, atol=2e-5, rtol=2e-3)
         if semantic:
             np.testing.assert_array_equal(np.concatenate(chunks), audio)
+
+
+@pytest.mark.parametrize("controls", [[1], [1, 0]], ids=["end", "end-start"])
+def test_generation_preserves_negative_history_after_cache_growth(
+    model: VibeVoiceModel,
+    monkeypatch: pytest.MonkeyPatch,
+    controls: list[int],
+) -> None:
+    # After 256 committed negative inputs, provisional audio crosses the
+    # backing-buffer boundary. A control must replace it before diffusion.
+    tokens = [2] * 256 + controls + [2, 3]
+    opts = GenerationOptions(
+        solver="dpm", cfg_scale=2.0, diffusion_steps=1, max_speech_tokens=258
+    )
+    expected = reference_audio(model, tokens, opts, semantic=False)
+    selected = iter(tokens)
+    monkeypatch.setattr(FastLM, "select_token", lambda *args, **kwargs: next(selected))
+
+    audio, metrics = generate(model, [4, 0], opts)
+
+    assert metrics.num_speech_tokens == 257
+    assert len(metrics.timings["diffusion"]) == 257
+    assert len(metrics.timings["lm_step"]) == len(tokens) - 1
+    np.testing.assert_allclose(audio, expected, atol=2e-5, rtol=2e-3)

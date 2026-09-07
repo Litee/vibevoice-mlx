@@ -342,6 +342,7 @@ def generate(
     NL = config.num_hidden_layers
 
     use_evolving_cfg = opts.cfg_scale > 1.0
+    prepared_neg_hidden = None
 
     # The negative branch consumes the previous input only when diffusion runs.
     # Only allocate when CFG is active to save memory.
@@ -432,14 +433,18 @@ def generate(
             pbar.update(1)
 
             if use_evolving_cfg:
-                t0 = time.perf_counter()
-                neg_pos = mx.array([float(neg_position)], dtype=mx.float32)
-                neg_cos, neg_sin = compute_rope(neg_pos, config.head_dim, config.rope_theta)
-                neg_hidden = fast_lm.forward(pending_neg_embed, neg_cos, neg_sin, neg_cache)
-                mx.eval(neg_hidden, *neg_cache.keys, *neg_cache.values)
+                if prepared_neg_hidden is None:
+                    t0 = time.perf_counter()
+                    neg_pos = mx.array([float(neg_position)], dtype=mx.float32)
+                    neg_cos, neg_sin = compute_rope(neg_pos, config.head_dim, config.rope_theta)
+                    neg_hidden = fast_lm.forward(pending_neg_embed, neg_cos, neg_sin, neg_cache)
+                    mx.eval(neg_hidden, *neg_cache.keys, *neg_cache.values)
+                    neg_position += 1
+                    negative_lm_ms = (time.perf_counter() - t0) * 1000
+                else:
+                    neg_hidden = prepared_neg_hidden
+                    prepared_neg_hidden = None
                 neg_condition = neg_hidden[:, 0:1, :].reshape(1, config.hidden_size)
-                neg_position += 1
-                negative_lm_ms = (time.perf_counter() - t0) * 1000
 
             # Diffusion (fast path — no nn.Module dispatch)
             t0 = time.perf_counter()
@@ -497,7 +502,21 @@ def generate(
 
         if use_evolving_cfg:
             pending_neg_embed = next_embed
-        hidden = fast_lm.forward(next_embed, cos, sin, cache)
+        provisional_neg_hidden = None
+        if (
+            use_evolving_cfg
+            and next_token == config.speech_diffusion_id
+            and metrics.num_speech_tokens < opts.max_speech_tokens
+            and step + 1 < opts.max_speech_tokens * 3
+        ):
+            neg_pos = mx.array([float(neg_position)], dtype=mx.float32)
+            neg_cos, neg_sin = compute_rope(neg_pos, config.head_dim, config.rope_theta)
+            hidden, provisional_neg_hidden = fast_lm.forward_dual(
+                next_embed, cos, sin, cache,
+                next_embed, neg_cos, neg_sin, neg_cache,
+            )
+        else:
+            hidden = fast_lm.forward(next_embed, cos, sin, cache)
 
         boost = 0.0
         # Silence-aware stop: boost speech_end when generating silence
@@ -510,6 +529,14 @@ def generate(
             if silent_run >= 3:
                 boost = min((silent_run - 2) * 5.0, 20.0)
         next_token = fast_lm.select_token(hidden, speech_only=True, stop_boost=boost)
+        if provisional_neg_hidden is not None:
+            if next_token == config.speech_diffusion_id:
+                prepared_neg_hidden = provisional_neg_hidden
+                neg_position += 1
+            else:
+                neg_cache.truncate(neg_position)
+        # Fused negative work is charged with this positive LM step. Remaining
+        # lazy operations evaluate with their consumers; do not add a sync here.
         metrics.record("lm_step", (time.perf_counter() - t0) * 1000 + negative_lm_ms)
         position += 1
 
