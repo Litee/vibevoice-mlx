@@ -484,6 +484,11 @@ def generate(
         pos = mx.array([float(position)], dtype=mx.float32)
         cos, sin = compute_rope(pos, config.head_dim, config.rope_theta)
 
+        if use_evolving_cfg and next_token == config.speech_start_id:
+            # Each segment's unconditional context starts at speech_start.
+            neg_cache.reset()
+            neg_position = 0
+
         if use_evolving_cfg:
             # Batched: read weights once for both main+neg passes
             neg_pos = mx.array([float(neg_position)], dtype=mx.float32)
