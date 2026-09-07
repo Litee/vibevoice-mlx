@@ -12,7 +12,9 @@ Usage:
 
 import argparse
 import json
+import re
 import shutil
+import tempfile
 from pathlib import Path
 
 import mlx.core as mx
@@ -23,7 +25,7 @@ from vibevoice_mlx.load_weights import (
     _load_safetensors, _map_hf_key, _quantize_predicate,
     load_config, resolve_model_path,
 )
-from vibevoice_mlx.model import VibeVoiceModel
+from vibevoice_mlx.model import VibeVoiceConfig, VibeVoiceModel
 
 MODEL_IDS = {
     "1.5b": "microsoft/VibeVoice-1.5B",
@@ -37,6 +39,10 @@ TOKENIZER_IDS = {
 
 # 5GB shard threshold
 SHARD_SIZE = 5 * 1024 * 1024 * 1024
+_CHECKPOINT_NAME = re.compile(
+    r"model(?:-\d{5}-of-\d{5})?\.safetensors|model\.safetensors\.index\.json"
+)
+_TEMPLATE_NAME = re.compile(r"chat_template\.jinja|additional_chat_templates/[^/]+\.jinja")
 
 
 def _detect_tokenizer_id(config) -> str:
@@ -55,6 +61,9 @@ def convert_model(model_id: str, output_dir: Path, tokenizer_id: str | None = No
 
     model_path = resolve_model_path(model_id)
     config = load_config(model_path)
+    for path in output_dir.glob("*.safetensors"):
+        if not _CHECKPOINT_NAME.fullmatch(path.name):
+            raise ValueError(f"Output directory contains unrelated checkpoint file: {path}")
 
     # Load original weights
     raw = _load_safetensors(model_path)
@@ -118,7 +127,43 @@ def convert_model(model_id: str, output_dir: Path, tokenizer_id: str | None = No
                   for k, v in quantized.items()}
         quantization_meta = {"bits": quantize_bits, "group_size": group_size}
 
-    output_dir.mkdir(parents=True, exist_ok=True)
+    destination = output_dir.resolve()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix=f".{destination.name}-", dir=destination.parent,
+    ) as temporary:
+        staging = Path(temporary)
+        _write_converted_bundle(
+            model_id, staging, mapped, config, quantization_meta, tokenizer_id,
+        )
+        current_files = {
+            path.relative_to(staging).as_posix() for path in staging.rglob("*") if path.is_file()
+        }
+        destination.mkdir(parents=True, exist_ok=True)
+        for path in staging.rglob("*"):
+            if path.is_file():
+                target = destination / path.relative_to(staging)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                path.replace(target)
+        candidates = [
+            *destination.iterdir(),
+            *(destination / "additional_chat_templates").glob("*.jinja"),
+        ]
+        for path in candidates:
+            name = path.relative_to(destination).as_posix()
+            managed = _CHECKPOINT_NAME.fullmatch(name) or _TEMPLATE_NAME.fullmatch(name)
+            if managed and name not in current_files:
+                path.unlink()
+
+    total_mb = sum(f.stat().st_size for f in output_dir.glob("*")) / 1e6
+    print(f"  Saved to {output_dir} ({total_mb:.0f} MB)")
+
+
+def _write_converted_bundle(
+    model_id: str, output_dir: Path, mapped: dict[str, mx.array],
+    config: VibeVoiceConfig, quantization_meta: dict | None, tokenizer_id: str | None,
+) -> None:
+    """Finish all fallible serialization before publishing checkpoint files."""
 
     # Save weights (potentially sharded for 7B+)
     total_bytes = sum(w.nbytes for w in mapped.values())
@@ -162,9 +207,6 @@ def convert_model(model_id: str, output_dir: Path, tokenizer_id: str | None = No
 
     # Model card
     _write_model_card(output_dir, model_id)
-
-    total_mb = sum(f.stat().st_size for f in output_dir.glob("*")) / 1e6
-    print(f"  Saved to {output_dir} ({total_mb:.0f} MB)")
 
 
 def _save_sharded(output_dir: Path, weights: dict[str, mx.array]):
