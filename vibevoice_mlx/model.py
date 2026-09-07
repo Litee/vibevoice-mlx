@@ -76,7 +76,7 @@ def apply_rope(x: mx.array, cos: mx.array, sin: mx.array) -> mx.array:
     cos = cos[None, None, :, :]  # (1, 1, Q, D)
     sin = sin[None, None, :, :]
     rotated = mx.concatenate([-x2, x1], axis=-1)
-    return x * cos + rotated * sin
+    return (x * cos + rotated * sin).astype(x.dtype)
 
 
 # ---------------------------------------------------------------------------
