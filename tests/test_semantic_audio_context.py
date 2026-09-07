@@ -160,7 +160,7 @@ def test_generation_preserves_audio_history(
         assert selected_solver.call_count == 3
         other_solver.assert_not_called()
         assert metrics.num_speech_tokens == 3
-        assert resets == [True]
+        assert resets == ([True, True] if semantic else [True])
         np.testing.assert_allclose(audio, expected, atol=2e-3, rtol=2e-3)
         if semantic:
             assert len(chunks) == 3
@@ -262,7 +262,7 @@ def test_stateful_native_feedback_preserves_lazy_history_and_reset() -> None:
 
     # Callback and LM retained only MLX arrays; synchronize for assertions here.
     assert metrics.num_speech_tokens == 3
-    assert feedback.reset_offsets == [2]
+    assert feedback.reset_offsets == [0, 2]
     assert len(feedback.chunks) == len(feedback.embeddings) == 3
     assert len(lm.deferred_inputs) == 5
     chunks = [np.array(chunk) for chunk in feedback.chunks]
@@ -279,3 +279,96 @@ def test_stateful_native_feedback_preserves_lazy_history_and_reset() -> None:
             np.array(lm.deferred_inputs[lm_position]),
             expected_history.astype(np.float16),
         )
+
+
+@pytest.mark.parametrize("termination", ["eos", "single_segment", "limit", "failure"])
+def test_generation_resets_semantic_state_before_each_invocation(
+    termination: str,
+) -> None:
+    config = SimpleNamespace(
+        hidden_size=2,
+        num_hidden_layers=0,
+        head_dim=2,
+        rope_theta=10000,
+        speech_start_id=0,
+        speech_end_id=1,
+        speech_diffusion_id=2,
+        eos_id=3,
+        vocab_size=4,
+        single_segment=termination == "single_segment",
+        speech_scaling_factor=1.0,
+        speech_bias_factor=0.0,
+    )
+    model = SimpleNamespace(
+        config=config,
+        vae_decoder=tiny_decoder(),
+        _fast_diff=None,
+        acoustic_connector=lambda sample: mx.zeros((1, 1, 2), dtype=mx.float16),
+    )
+    sample = mx.ones((1, 64), dtype=mx.float32)
+    state = 99
+    observed_state = []
+    resets = []
+
+    def reset() -> None:
+        nonlocal state
+        state = 0
+        resets.append(True)
+
+    def feedback(_: np.ndarray) -> np.ndarray:
+        nonlocal state
+        observed_state.append(state)
+        state += 1
+        return np.zeros((1, 1, 2), dtype=np.float32)
+
+    first_tokens = {
+        "eos": [2, 3],
+        "single_segment": [2, 1],
+        "limit": [2, 2],
+        "failure": [2, 2],
+    }[termination]
+    model._fast_lm = FakeLM(first_tokens)
+    first_options = generation.GenerationOptions(
+        cfg_scale=1, max_speech_tokens=1 if termination == "limit" else 5
+    )
+    first_solver = (
+        [sample, RuntimeError("interrupted generation")]
+        if termination == "failure"
+        else None
+    )
+    with patch.object(
+        generation,
+        "dpm_solver_2m",
+        side_effect=first_solver,
+        return_value=sample,
+    ):
+        if termination == "failure":
+            with pytest.raises(RuntimeError, match="interrupted generation"):
+                generation.generate(
+                    model,
+                    [0],
+                    first_options,
+                    semantic_encoder_fn=feedback,
+                    semantic_reset_fn=reset,
+                )
+        else:
+            generation.generate(
+                model,
+                [0],
+                first_options,
+                semantic_encoder_fn=feedback,
+                semantic_reset_fn=reset,
+            )
+
+    model._fast_lm = FakeLM([2, 2])
+    with patch.object(generation, "dpm_solver_2m", return_value=sample):
+        generation.generate(
+            model,
+            [0],
+            generation.GenerationOptions(cfg_scale=1, max_speech_tokens=1),
+            semantic_encoder_fn=feedback,
+            semantic_reset_fn=reset,
+        )
+
+    assert observed_state == [0, 0]
+    assert resets == [True, True]
