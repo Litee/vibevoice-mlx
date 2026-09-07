@@ -8,6 +8,7 @@ from pathlib import Path
 
 import mlx.core as mx
 import pytest
+from checkpoint_helpers import tiny_vae_weights
 from mlx.utils import tree_flatten
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
@@ -96,9 +97,9 @@ def tiny_checkpoint(tmp_path: Path) -> Iterator[Path]:
         )
         model = VibeVoiceModel(config)
         (directory / "config.json").write_text(json.dumps(asdict(config)))
-        mx.save_safetensors(
-            str(directory / "model.safetensors"), dict(tree_flatten(model.parameters()))
-        )
+        weights = dict(tree_flatten(model.parameters()))
+        weights.update(tiny_vae_weights(config.vae_dim))
+        mx.save_safetensors(str(directory / "model.safetensors"), weights)
         yield directory
     finally:
         mx.set_default_device(previous_device)
