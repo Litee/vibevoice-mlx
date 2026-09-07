@@ -1,4 +1,4 @@
-"""Custom tokenizer code requires an explicit trust decision."""
+"""Tokenizer loading never executes repository-supplied Python code."""
 
 import json
 import sys
@@ -105,140 +105,98 @@ def tiny_checkpoint(tmp_path: Path) -> Iterator[Path]:
         mx.set_default_device(previous_device)
 
 
-def test_tokenization_rejects_custom_code_by_default(
-    custom_tokenizer: tuple[Path, Path],
-) -> None:
-    directory, marker = custom_tokenizer
-    with pytest.raises(ValueError, match="trust_remote_code"):
-        tokenize_text("Hello", str(directory), VibeVoiceConfig())
-    assert not marker.exists()
-
-
-def test_tokenization_allows_explicit_custom_code_opt_in(
-    custom_tokenizer: tuple[Path, Path],
-) -> None:
-    directory, marker = custom_tokenizer
-    tokens = tokenize_text(
-        "Hello", str(directory), VibeVoiceConfig(), trust_remote_code=True
-    )
-    assert tokens
-    assert marker.read_text() == "executed"
-
-
-@pytest.mark.parametrize("trust", [False, True])
-def test_inference_cli_requires_explicit_trust(
-    custom_tokenizer: tuple[Path, Path],
-    tiny_checkpoint: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    trust: bool,
-) -> None:
-    directory, marker = custom_tokenizer
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "vibevoice-mlx",
-            "--model",
-            str(tiny_checkpoint),
-            "--tokenizer",
-            str(directory),
-            "--text",
-            "Hello",
-            "--no-semantic",
-            "--max-speech-tokens",
-            "0",
-            *(["--trust-remote-code"] if trust else []),
-        ],
-    )
-    if trust:
-        e2e_pipeline.main()
-        assert marker.read_text() == "executed"
-    else:
-        with pytest.raises(ValueError, match="trust_remote_code"):
-            e2e_pipeline.main()
-        assert not marker.exists()
-
-
-def test_conversion_rejects_custom_code_by_default(
+@pytest.mark.parametrize(
+    "route", ["api", "conversion_api", "inference", "conversion", "builtin"]
+)
+def test_custom_tokenizer_code_is_rejected(
     custom_tokenizer: tuple[Path, Path],
     tiny_checkpoint: Path,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    route: str,
 ) -> None:
     directory, marker = custom_tokenizer
     with pytest.raises(ValueError, match="trust_remote_code"):
-        convert.convert_model(
-            str(tiny_checkpoint), tmp_path / "converted", str(directory)
+        _run_route(route, directory, tiny_checkpoint, tmp_path, monkeypatch)
+    assert not marker.exists()
+
+
+def _run_route(
+    route: str,
+    tokenizer_path: Path,
+    checkpoint: Path,
+    output: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if route == "api":
+        assert tokenize_text("Hello", str(tokenizer_path), VibeVoiceConfig())
+    elif route == "conversion_api":
+        saved = output / "converted_output"
+        convert.convert_model(str(checkpoint), saved, str(tokenizer_path))
+        assert tokenize_text("Hello", str(saved), VibeVoiceConfig())
+    elif route == "inference":
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "vibevoice-mlx",
+                "--model",
+                str(checkpoint),
+                "--tokenizer",
+                str(tokenizer_path),
+                "--text",
+                "Hello",
+                "--no-semantic",
+                "--max-speech-tokens",
+                "0",
+            ],
         )
-    assert not marker.exists()
+        e2e_pipeline.main()
+    else:
+        saved = output / "converted_output"
+        if route == "builtin":
+            monkeypatch.setitem(convert.MODEL_IDS, "1.5b", str(checkpoint))
+            monkeypatch.setitem(convert.TOKENIZER_IDS, "1.5b", str(tokenizer_path))
+            model_args = ["--models", "1.5b"]
+            saved = saved / "vibevoice-1.5b-mlx"
+        else:
+            model_args = [
+                "--model-id",
+                str(checkpoint),
+                "--tokenizer",
+                str(tokenizer_path),
+            ]
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "convert.py",
+                "--output-dir",
+                str(output / "converted_output"),
+                *model_args,
+            ],
+        )
+        convert.main()
+        assert (saved / "model.safetensors").exists()
+        assert tokenize_text("Hello", str(saved), VibeVoiceConfig())
 
 
-def test_conversion_allows_explicit_custom_code_opt_in(
-    custom_tokenizer: tuple[Path, Path],
-    tiny_checkpoint: Path,
-    tmp_path: Path,
-) -> None:
-    directory, marker = custom_tokenizer
-    output = tmp_path / "converted"
-    convert.convert_model(
-        str(tiny_checkpoint), output, str(directory), trust_remote_code=True
-    )
-    assert marker.read_text() == "executed"
-    assert (output / "model.safetensors").exists()
-    assert (output / "tokenizer_config.json").exists()
-    assert tokenize_text(
-        "Hello", str(output), VibeVoiceConfig(), trust_remote_code=True
-    )
-
-
-@pytest.mark.parametrize("builtin", [False, True])
-@pytest.mark.parametrize("trust", [False, True])
-def test_conversion_cli_requires_explicit_trust(
-    custom_tokenizer: tuple[Path, Path],
+@pytest.mark.parametrize(
+    "route", ["api", "conversion_api", "inference", "conversion", "builtin"]
+)
+def test_standard_tokenizer_loads_without_trust(
     tiny_checkpoint: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    builtin: bool,
-    trust: bool,
+    route: str,
 ) -> None:
-    directory, marker = custom_tokenizer
-    output = tmp_path / "converted_output"
-    if builtin:
-        monkeypatch.setitem(convert.MODEL_IDS, "1.5b", str(tiny_checkpoint))
-        monkeypatch.setitem(convert.TOKENIZER_IDS, "1.5b", str(directory))
-        model_args = ["--models", "1.5b"]
-        saved = output / "vibevoice-1.5b-mlx"
-    else:
-        model_args = ["--model-id", str(tiny_checkpoint), "--tokenizer", str(directory)]
-        saved = output
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "convert.py",
-            "--output-dir",
-            str(output),
-            *model_args,
-            *(["--trust-remote-code"] if trust else []),
-        ],
-    )
-    if trust:
-        convert.main()
-        assert marker.read_text() == "executed"
-        assert (saved / "model.safetensors").exists()
-        assert (saved / "tokenizer_config.json").exists()
-    else:
-        with pytest.raises(ValueError, match="trust_remote_code"):
-            convert.main()
-        assert not marker.exists()
-
-
-def test_standard_tokenizer_loads_without_trust(tmp_path: Path) -> None:
     tokenizer = PreTrainedTokenizerFast(
         tokenizer_object=Tokenizer(WordLevel({"<unk>": 0}, unk_token="<unk>")),
         unk_token="<unk>",
     )
-    tokenizer.save_pretrained(tmp_path)
-    assert tokenize_text("Hello", str(tmp_path), VibeVoiceConfig())
+    directory = tmp_path / "standard_tokenizer"
+    tokenizer.save_pretrained(directory)
+    _run_route(route, directory, tiny_checkpoint, tmp_path, monkeypatch)
 
 
 def test_passed_tokenizer_does_not_load_custom_code(
