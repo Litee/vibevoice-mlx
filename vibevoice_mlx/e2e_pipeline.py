@@ -292,7 +292,7 @@ def tokenize_text(
     for line in lines:
         line = line.strip()
         # Single-segment models require "Speaker 0:" prefix
-        if config.single_segment and not re.match(r"Speaker\s+\d+", line):
+        if config.single_segment and not re.match(r"^Speaker\s+(\d+)(?=\s*:)", line):
             line = f"Speaker 0: {line}"
         speaker_tokens += tokenizer.encode(f" {line}\n", add_special_tokens=False)
 

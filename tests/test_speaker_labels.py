@@ -120,8 +120,10 @@ def test_unlabeled_text_keeps_existing_prefix_behavior(
 
 
 @pytest.mark.parametrize("single_segment", [False, True])
+@pytest.mark.parametrize("with_voice", [False, True])
 def test_leading_speaker_mention_without_colon_is_dialogue(
     single_segment: bool,
+    with_voice: bool,
 ) -> None:
     tokenizer = RecordingTokenizer()
     tokenize_text(
@@ -129,19 +131,24 @@ def test_leading_speaker_mention_without_colon_is_dialogue(
         "unused",
         VibeVoiceConfig(single_segment=single_segment),
         tokenizer=tokenizer,
-        speaker_embeds=[(1, np.zeros((1, 3)))],
+        speaker_embeds=[(1, np.zeros((1, 3)))] if with_voice else None,
     )
     prefix = " Speaker 0: " if single_segment else " "
     assert tokenizer.text[-2] == f"{prefix}Speaker 2 should begin.\n"
 
 
-def test_labels_without_voice_references_keep_existing_behavior() -> None:
+@pytest.mark.parametrize("single_segment", [False, True])
+@pytest.mark.parametrize("colon_spacing", ["", "  "])
+def test_labels_without_voice_references_keep_existing_behavior(
+    single_segment: bool, colon_spacing: str
+) -> None:
     tokenizer = RecordingTokenizer()
+    lines = [f"Speaker 1{colon_spacing}: Hello", f"Speaker 2{colon_spacing}: Hi"]
     result = tokenize_text(
-        "Speaker 1: Hello\nSpeaker 2: Hi",
+        "\n".join(lines),
         "unused",
-        VibeVoiceConfig(),
+        VibeVoiceConfig(single_segment=single_segment),
         tokenizer=tokenizer,
     )
     assert isinstance(result, list)
-    assert tokenizer.text[-3:-1] == [" Speaker 1: Hello\n", " Speaker 2: Hi\n"]
+    assert tokenizer.text[-3:-1] == [f" {line}\n" for line in lines]
