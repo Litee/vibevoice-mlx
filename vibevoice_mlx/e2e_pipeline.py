@@ -26,7 +26,13 @@ import numpy as np
 
 import mlx.core as mx
 
-from .generate import GenerationOptions, _validate_cfg_scale, _validate_diffusion_steps, generate
+from .generate import (
+    GenerationOptions,
+    MLXSemanticCallback,
+    _validate_cfg_scale,
+    _validate_diffusion_steps,
+    generate,
+)
 from .load_weights import load_model, resolve_model_path
 from .model import VibeVoiceConfig, VibeVoiceModel
 
@@ -436,7 +442,9 @@ def _try_coreml_semantic(
         return None
 
 
-def _try_mlx_semantic(model, config, model_id):
+def _try_mlx_semantic(
+    model: VibeVoiceModel, config: VibeVoiceConfig, model_id: str,
+) -> SemanticCallbacks | None:
     """Load pure MLX semantic encoder from HF weights."""
     try:
         from .semantic_encoder import load_semantic_encoder, FRAME_SAMPLES
@@ -460,21 +468,21 @@ def _try_mlx_semantic(model, config, model_id):
         mx.eval(test_out)
         sem_enc.reset_caches()
 
-        def semantic_fn(audio_chunk: np.ndarray) -> np.ndarray:
-            audio_np = np.zeros((1, 1, FRAME_SAMPLES), dtype=np.float32)
-            audio_np[0, 0, :min(len(audio_chunk), FRAME_SAMPLES)] = audio_chunk[:FRAME_SAMPLES]
-            features = sem_enc(mx.array(audio_np))
-            mx.eval(features)
+        def encode_mlx(audio_chunk: mx.array) -> mx.array:
+            audio = audio_chunk[:FRAME_SAMPLES].astype(mx.float32)
+            if audio.shape[0] < FRAME_SAMPLES:
+                audio = mx.pad(audio, [(0, FRAME_SAMPLES - audio.shape[0])])
+            features = sem_enc(audio.reshape(1, 1, FRAME_SAMPLES))
             feat = features.transpose(0, 2, 1).astype(mx.float16)
             embedding = model.semantic_connector(feat)
-            mx.eval(embedding)
-            return np.array(embedding)
+            mx.eval(embedding, *sem_enc.caches)
+            return embedding
 
         def reset_fn() -> None:
             sem_enc.reset_caches()
 
         logger.info("Semantic encoder: MLX (%d cache buffers)", len(sem_enc.caches))
-        return semantic_fn, reset_fn
+        return MLXSemanticCallback(encode_mlx), reset_fn
     except Exception as e:
         logger.warning("Could not load semantic encoder: %s", e)
         return None

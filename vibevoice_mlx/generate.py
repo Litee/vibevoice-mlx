@@ -296,6 +296,20 @@ def dpm_solver_sde_2m(
 # Main generation loop
 # ---------------------------------------------------------------------------
 
+@dataclass
+class MLXSemanticCallback:
+    """Opt into device-native feedback while retaining the NumPy callback API.
+
+    encode_mlx receives a flat float32 audio chunk and returns an MLX embedding.
+    Calling the adapter directly still accepts and returns NumPy arrays.
+    """
+
+    encode_mlx: Callable[[mx.array], mx.array]
+
+    def __call__(self, audio_chunk: np.ndarray) -> np.ndarray:
+        return np.array(self.encode_mlx(mx.array(audio_chunk, dtype=mx.float32)))
+
+
 def generate(
     model: VibeVoiceModel,
     input_ids: list[int],
@@ -313,6 +327,7 @@ def generate(
         opts: Generation options
         semantic_encoder_fn: Optional callback for semantic encoder.
             Signature: fn(audio_chunk: np.ndarray) -> np.ndarray of shape (1, 1, hidden_size)
+            MLXSemanticCallback opts into MLX arrays without host round trips.
         voice_embeds: Optional dict mapping position -> embedding for voice cloning.
             Each value is an mx.array of shape (1, hidden_size).
         estimated_total: Estimated total speech tokens for progress bar.
@@ -408,7 +423,8 @@ def generate(
     )
 
     # Autoregressive generation
-    audio_chunks = []
+    audio_chunks: list[np.ndarray | mx.array] = []
+    native_semantic = isinstance(semantic_encoder_fn, MLXSemanticCallback)
     all_latents = []
     silent_run = 0
     rng = np.random.RandomState(opts.seed)
@@ -474,7 +490,10 @@ def generate(
                 latent_frame = latent[:, :, None].astype(dtype)
                 audio = streaming_decoder(latent_frame)
                 mx.eval(audio, *streaming_decoder.caches.values())
-                audio_chunks.append(np.array(audio).squeeze().astype(np.float32))
+                if native_semantic:
+                    audio_chunks.append(audio.reshape(-1).astype(mx.float32))
+                else:
+                    audio_chunks.append(np.array(audio).squeeze().astype(np.float32))
                 metrics.record("vae", (time.perf_counter() - t0) * 1000)
 
             # Connectors: acoustic + optional semantic feedback
@@ -482,9 +501,14 @@ def generate(
             acoustic_embed = model.acoustic_connector(sample[:, None, :].astype(dtype))
 
             if semantic_encoder_fn is not None and audio_chunks:
-                chunk = audio_chunks[-1][:3200].astype(np.float32)
-                sem_embed_np = semantic_encoder_fn(chunk)
-                sem_embed = mx.array(sem_embed_np).astype(dtype)
+                if native_semantic:
+                    sem_embed = semantic_encoder_fn.encode_mlx(
+                        audio_chunks[-1][:3200]
+                    ).astype(dtype)
+                else:
+                    chunk = audio_chunks[-1][:3200].astype(np.float32)
+                    sem_embed_np = semantic_encoder_fn(chunk)
+                    sem_embed = mx.array(sem_embed_np).astype(dtype)
                 if sem_embed.ndim == 3:
                     next_embed = acoustic_embed + sem_embed
                 else:
@@ -558,7 +582,10 @@ def generate(
     if all_latents:
         t0 = time.perf_counter()
         if streaming_decoder is not None:
-            audio_out = np.concatenate(audio_chunks)
+            if native_semantic:
+                audio_out = np.array(mx.concatenate(audio_chunks))
+            else:
+                audio_out = np.concatenate(audio_chunks)
         else:
             full_latent = mx.concatenate(all_latents, axis=0).T[None, :, :].astype(dtype)
             full_audio = model.vae_decoder(full_latent)
