@@ -74,7 +74,10 @@ class FakeLM(FastLM):
 
 @pytest.mark.parametrize("semantic", [True, False])
 @pytest.mark.parametrize("limit", [False, True])
-def test_generation_preserves_audio_history(semantic: bool, limit: bool) -> None:
+@pytest.mark.parametrize("solver", ["dpm", "sde"])
+def test_generation_preserves_audio_history(
+    semantic: bool, limit: bool, solver: str
+) -> None:
     vae = tiny_decoder()
     config = SimpleNamespace(
         hidden_size=2,
@@ -116,20 +119,27 @@ def test_generation_preserves_audio_history(semantic: bool, limit: bool) -> None
             ) as batch_decode,
             patch.object(
                 generation,
-                "dpm_solver_2m",
+                "dpm_solver_2m" if solver == "dpm" else "dpm_solver_sde_2m",
                 side_effect=[samples[i : i + 1] for i in range(3)],
-            ),
+            ) as selected_solver,
+            patch.object(
+                generation,
+                "dpm_solver_sde_2m" if solver == "dpm" else "dpm_solver_2m",
+                side_effect=AssertionError("Wrong solver selected"),
+            ) as other_solver,
         ):
             audio, metrics = generation.generate(
                 model,
                 [0],
                 generation.GenerationOptions(
-                    cfg_scale=1, max_speech_tokens=3 if limit else 5
+                    solver=solver, cfg_scale=1, max_speech_tokens=3 if limit else 5
                 ),
                 semantic_encoder_fn=feedback if semantic else None,
                 semantic_reset_fn=lambda resets=resets: resets.append(True),
             )
         assert batch_decode.call_count == (0 if semantic else 1)
+        assert selected_solver.call_count == 3
+        other_solver.assert_not_called()
         assert metrics.num_speech_tokens == 3
         assert resets == [True]
         np.testing.assert_allclose(audio, expected, atol=2e-3, rtol=2e-3)

@@ -109,6 +109,7 @@ Text ──→ Qwen2.5 LLM backbone ──→ control tokens
 --save-voice FILE        Save encoded voice embeddings for reuse
 --quantize {4,8}         Quantize LLM backbone (int4 or int8)
 --quantize-diffusion     Also quantize the diffusion head
+--solver {dpm,sde}       DPM-Solver++ ODE or stochastic SDE (default: dpm)
 --diffusion-steps N      DPM-Solver++ steps (default: 10)
 --cfg-scale FLOAT        Classifier-free guidance scale (default: 1.3)
 --max-speech-tokens N    Max speech tokens to generate (default: 200)
