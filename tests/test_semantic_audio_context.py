@@ -60,11 +60,14 @@ class FakeLM(FastLM):
         self.embed_w = mx.zeros((4, 2), dtype=mx.float16)
         self.speech_token_ids = (0, 1, 2, 3)
         self._stop_indices = (1, 3)
+        self.inputs: list[np.ndarray] = []
 
     def prefill(self, *args: object) -> mx.array:
         return mx.zeros((1, 1, 2), dtype=mx.float16)
 
-    forward = prefill
+    def forward(self, embedding: mx.array, *args: object) -> mx.array:
+        self.inputs.append(np.array(embedding))
+        return self.prefill()
 
     def logits(self, hidden: mx.array, *, speech_only: bool = False) -> mx.array:
         logits = mx.full((1, 1, 4), -10.0)
@@ -72,11 +75,11 @@ class FakeLM(FastLM):
         return logits
 
 
-@pytest.mark.parametrize("semantic", [True, False])
+@pytest.mark.parametrize("semantic", ["numpy", "mlx", None])
 @pytest.mark.parametrize("limit", [False, True])
 @pytest.mark.parametrize("solver", ["dpm", "sde"])
 def test_generation_preserves_audio_history(
-    semantic: bool, limit: bool, solver: str
+    semantic: str | None, limit: bool, solver: str
 ) -> None:
     vae = tiny_decoder()
     config = SimpleNamespace(
@@ -110,8 +113,24 @@ def test_generation_preserves_audio_history(
         resets = []
 
         def feedback(chunk: np.ndarray, chunks: list = chunks) -> np.ndarray:
+            assert isinstance(chunk, np.ndarray)
             chunks.append(chunk.copy())
-            return np.zeros((1, 1, 2), dtype=np.float32)
+            return chunk[:2].reshape(1, 1, 2)
+
+        def feedback_mlx(chunk: mx.array, chunks: list = chunks) -> mx.array:
+            assert isinstance(chunk, mx.array)
+            assert chunk.dtype == mx.float32
+            chunks.append(np.array(chunk))
+            return chunk[:2].reshape(1, 1, 2)
+
+        callback = feedback if semantic == "numpy" else None
+        if semantic == "mlx":
+
+            class NativeOnlyFeedback(generation.MLXSemanticCallback):
+                def __call__(self, chunk: np.ndarray) -> np.ndarray:
+                    raise AssertionError("Generation must use native MLX feedback")
+
+            callback = NativeOnlyFeedback(feedback_mlx)
 
         with (
             patch.object(
@@ -134,7 +153,7 @@ def test_generation_preserves_audio_history(
                 generation.GenerationOptions(
                     solver=solver, cfg_scale=1, max_speech_tokens=3 if limit else 5
                 ),
-                semantic_encoder_fn=feedback if semantic else None,
+                semantic_encoder_fn=callback,
                 semantic_reset_fn=lambda resets=resets: resets.append(True),
             )
         assert batch_decode.call_count == (0 if semantic else 1)
@@ -150,3 +169,113 @@ def test_generation_preserves_audio_history(
                 np.concatenate(chunks), expected, atol=2e-3, rtol=2e-3
             )
             np.testing.assert_array_equal(np.concatenate(chunks), audio)
+            for chunk, position in zip(chunks, [0, 1, 4]):
+                np.testing.assert_array_equal(
+                    model._fast_lm.inputs[position],
+                    chunk[:2].reshape(1, 1, 2).astype(np.float16),
+                )
+
+
+def test_mlx_callback_preserves_numpy_contract() -> None:
+    def encode(audio: mx.array) -> mx.array:
+        assert isinstance(audio, mx.array)
+        assert audio.dtype == mx.float32
+        return audio[:2].reshape(1, 1, 2).astype(mx.float16)
+
+    callback = generation.MLXSemanticCallback(encode)
+    embedding = callback(np.array([0.25, -0.5, 1.0], dtype=np.float16))
+    assert isinstance(embedding, np.ndarray)
+    assert embedding.dtype == np.float16
+    np.testing.assert_array_equal(embedding, [[[0.25, -0.5]]])
+
+
+def test_stateful_native_feedback_preserves_lazy_history_and_reset() -> None:
+    class DeferredLM(FakeLM):
+        def __init__(self) -> None:
+            super().__init__([2, 2, 1, 0, 2, 3])
+            self.deferred_inputs: list[mx.array] = []
+
+        def forward(self, embedding: mx.array, *args: object) -> mx.array:
+            self.deferred_inputs.append(embedding)
+            return embedding
+
+        def select_token(self, *args: object, **kwargs: object) -> int:
+            # Token decisions are scripted; do not evaluate feedback through argmax.
+            return next(self.tokens)
+
+    class StatefulFeedback(generation.MLXSemanticCallback):
+        def __init__(self) -> None:
+            super().__init__(self.encode)
+            self.history = mx.zeros((1, 1, 2), dtype=mx.float32)
+            self.chunks: list[mx.array] = []
+            self.embeddings: list[mx.array] = []
+            self.reset_offsets: list[int] = []
+
+        def __call__(self, chunk: np.ndarray) -> np.ndarray:
+            raise AssertionError("Native generation must not invoke the NumPy adapter")
+
+        def encode(self, chunk: mx.array) -> mx.array:
+            assert isinstance(chunk, mx.array)
+            assert chunk.dtype == mx.float32
+            self.chunks.append(chunk)
+            self.history = self.history + chunk[:2].reshape(1, 1, 2) + 0.25
+            self.embeddings.append(self.history)
+            return self.history
+
+        def reset(self) -> None:
+            self.reset_offsets.append(len(self.chunks))
+            self.history = mx.zeros((1, 1, 2), dtype=mx.float32)
+
+    config = SimpleNamespace(
+        hidden_size=2,
+        num_hidden_layers=0,
+        head_dim=2,
+        rope_theta=10000,
+        speech_start_id=0,
+        speech_end_id=1,
+        speech_diffusion_id=2,
+        eos_id=3,
+        single_segment=False,
+        speech_scaling_factor=1.0,
+        speech_bias_factor=0.0,
+    )
+    lm = DeferredLM()
+    model = SimpleNamespace(
+        config=config,
+        vae_decoder=tiny_decoder(),
+        _fast_lm=lm,
+        _fast_diff=None,
+        acoustic_connector=lambda sample: mx.zeros((1, 1, 2), dtype=mx.float16),
+    )
+    feedback = StatefulFeedback()
+    samples = mx.arange(3 * 64, dtype=mx.float32).reshape(3, 64) / 64
+    with patch.object(
+        generation, "dpm_solver_2m", side_effect=[samples[i : i + 1] for i in range(3)]
+    ):
+        audio, metrics = generation.generate(
+            model,
+            [0],
+            generation.GenerationOptions(cfg_scale=1, max_speech_tokens=5),
+            semantic_encoder_fn=feedback,
+            semantic_reset_fn=feedback.reset,
+        )
+
+    # Callback and LM retained only MLX arrays; synchronize for assertions here.
+    assert metrics.num_speech_tokens == 3
+    assert feedback.reset_offsets == [2]
+    assert len(feedback.chunks) == len(feedback.embeddings) == 3
+    assert len(lm.deferred_inputs) == 5
+    chunks = [np.array(chunk) for chunk in feedback.chunks]
+    np.testing.assert_array_equal(np.concatenate(chunks), audio)
+    expected_history = np.zeros((1, 1, 2), dtype=np.float32)
+    for index, lm_position in enumerate([0, 1, 4]):
+        if index == 2:
+            expected_history = np.zeros_like(expected_history)
+        expected_history = expected_history + chunks[index][:2].reshape(1, 1, 2) + 0.25
+        np.testing.assert_array_equal(
+            np.array(feedback.embeddings[index]), expected_history
+        )
+        np.testing.assert_array_equal(
+            np.array(lm.deferred_inputs[lm_position]),
+            expected_history.astype(np.float16),
+        )
