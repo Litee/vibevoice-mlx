@@ -33,7 +33,7 @@ def test_speaker_without_reference_is_rejected(
         tokenize_text(
             script,
             "unused",
-            VibeVoiceConfig(single_segment=single_segment),
+            VibeVoiceConfig(single_segment=single_segment, hidden_size=3),
             tokenizer=RecordingTokenizer(),
             ref_audio=[str(audio_path)] * 2 if file_references else None,
             speaker_embeds=None if file_references else [(1, np.zeros((1, 3)))] * 2,
@@ -75,7 +75,7 @@ def test_voice_clone_speaker_labels(
     script: str, expected: str, single_segment: bool
 ) -> None:
     tokenizer = RecordingTokenizer()
-    config = VibeVoiceConfig(single_segment=single_segment)
+    config = VibeVoiceConfig(single_segment=single_segment, hidden_size=3)
     embeddings = [np.zeros((2, 3)), np.ones((1, 3))]
     result = tokenize_text(
         script,
@@ -107,7 +107,7 @@ def test_unlabeled_text_keeps_existing_prefix_behavior(
     tokenize_text(
         "Ask Speaker 2 to begin.",
         "unused",
-        VibeVoiceConfig(single_segment=single_segment),
+        VibeVoiceConfig(single_segment=single_segment, hidden_size=3),
         tokenizer=tokenizer,
         speaker_embeds=[(1, np.zeros((1, 3)))] if with_voice else None,
     )
@@ -127,7 +127,7 @@ def test_leading_speaker_mention_without_colon_is_dialogue(
     tokenize_text(
         "Speaker 2 should begin.",
         "unused",
-        VibeVoiceConfig(single_segment=single_segment),
+        VibeVoiceConfig(single_segment=single_segment, hidden_size=3),
         tokenizer=tokenizer,
         speaker_embeds=[(1, np.zeros((1, 3)))],
     )
