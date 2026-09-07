@@ -53,8 +53,8 @@ def _detect_tokenizer_id(config) -> str:
 
 
 def convert_model(model_id: str, output_dir: Path, tokenizer_id: str | None = None,
-                   quantize_bits: int | None = None):
-    """Convert a VibeVoice-compatible model to MLX format."""
+                   quantize_bits: int | None = None, trust_remote_code: bool = False) -> None:
+    """Convert to MLX, allowing tokenizer Python code only with explicit trust."""
     print(f"\n{'='*60}")
     print(f"Converting {model_id}" + (f" (INT{quantize_bits})" if quantize_bits else ""))
     print(f"{'='*60}")
@@ -203,7 +203,7 @@ def _write_converted_bundle(
 
     # Copy tokenizer
     tok_id = tokenizer_id or _detect_tokenizer_id(config)
-    _copy_tokenizer(output_dir, tok_id)
+    _copy_tokenizer(output_dir, tok_id, trust_remote_code=trust_remote_code)
 
     # Model card
     _write_model_card(output_dir, model_id)
@@ -247,10 +247,14 @@ def _save_sharded(output_dir: Path, weights: dict[str, mx.array]):
     print(f"  Saved {n_shards} shards")
 
 
-def _copy_tokenizer(output_dir: Path, tokenizer_id: str):
-    """Copy tokenizer files from Qwen2.5."""
+def _copy_tokenizer(
+    output_dir: Path, tokenizer_id: str, trust_remote_code: bool = False,
+) -> None:
+    """Copy tokenizer files, requiring opt-in for repository Python code."""
     from transformers import AutoTokenizer
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_id, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        tokenizer_id, trust_remote_code=trust_remote_code
+    )
     tokenizer.save_pretrained(str(output_dir))
     print(f"  Tokenizer saved from {tokenizer_id}")
 
@@ -283,7 +287,7 @@ def upload(output_dir: Path, repo_id: str):
     print(f"  Uploaded to https://huggingface.co/{repo_id}")
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description="Convert VibeVoice-compatible weights to MLX format")
     parser.add_argument("--output-dir", type=str, default="converted", help="Output directory")
     parser.add_argument("--models", nargs="+", default=None, choices=["1.5b", "7b"],
@@ -294,6 +298,8 @@ def main():
                         help="Save pre-quantized weights (int4 or int8)")
     parser.add_argument("--tokenizer", type=str, default=None,
                         help="Tokenizer ID (auto-detected if not specified)")
+    parser.add_argument("--trust-remote-code", action="store_true",
+                        help="Allow the tokenizer repository's Python code to run (only for trusted sources)")
     parser.add_argument("--upload", action="store_true", help="Upload to HuggingFace")
     parser.add_argument("--hf-prefix", type=str, default="gafiatulin", help="HF username/org prefix")
     args = parser.parse_args()
@@ -304,7 +310,7 @@ def main():
         # Convert arbitrary model
         out = base if base.name != "converted" else base / (args.model_id.replace("/", "-") + "-mlx")
         convert_model(args.model_id, out, tokenizer_id=args.tokenizer,
-                      quantize_bits=args.quantize)
+                      quantize_bits=args.quantize, trust_remote_code=args.trust_remote_code)
         if args.upload:
             repo_id = f"{args.hf_prefix}/{out.name}"
             upload(out, repo_id)
@@ -315,7 +321,7 @@ def main():
             model_id = MODEL_IDS[tag]
             out = base / f"vibevoice-{tag}-mlx"
             convert_model(model_id, out, tokenizer_id=TOKENIZER_IDS[tag],
-                          quantize_bits=args.quantize)
+                          quantize_bits=args.quantize, trust_remote_code=args.trust_remote_code)
             if args.upload:
                 upload(out, f"{args.hf_prefix}/vibevoice-{tag}-mlx")
 
