@@ -74,13 +74,20 @@ def _load_and_resample(audio_path: str) -> np.ndarray:
     """Load audio file, convert to mono 24kHz float32."""
     import soundfile as sf
     wav, sr = sf.read(audio_path, dtype="float32")
+    if wav.size == 0:
+        raise ValueError(f"Reference audio {audio_path!r} is empty.")
     if wav.ndim > 1:
         wav = wav.mean(axis=1)
+    if not np.isfinite(wav).all():
+        raise ValueError(f"Reference audio {audio_path!r} contains non-finite samples.")
     if sr != SAMPLE_RATE:
         from scipy.signal import resample_poly
         gcd = math.gcd(SAMPLE_RATE, sr)
         wav = resample_poly(wav, SAMPLE_RATE // gcd, sr // gcd).astype(np.float32)
-    return wav.astype(np.float32)
+    wav = wav.astype(np.float32)
+    if wav.size == 0 or not np.isfinite(wav).all():
+        raise ValueError(f"Reference audio {audio_path!r} is empty or non-finite after conversion.")
+    return wav
 
 
 # ---------------------------------------------------------------------------
