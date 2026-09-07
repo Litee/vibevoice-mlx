@@ -11,6 +11,7 @@ Model loading still uses nn.Module for clean weight mapping.
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -309,6 +310,14 @@ class FastLM:
         return mx.fast.rms_norm(h, self.norm_w, eps)
 
 
+@dataclass(frozen=True)
+class PreparedDiffusionConditioning:
+    """Per-solve modulation arrays, indexed by timestep then CFG branch."""
+
+    layers: tuple[mx.array, ...]
+    final: mx.array
+
+
 class FastDiffusionHead:
     """Flat-dict diffusion head for fast DPM solver.
 
@@ -336,6 +345,57 @@ class FastDiffusionHead:
         self.final_adaln = _extract_linear(dh.final_layer.adaLN_modulation[1])
         self.final_linear = _extract_linear(dh.final_layer.linear)
         self.H = config.hidden_size
+
+    def prepare_conditioning(
+        self, condition: mx.array, timesteps: mx.array, *, dtype: mx.Dtype,
+    ) -> PreparedDiffusionConditioning:
+        """Prepare sample-independent work for one complete denoising schedule.
+
+        Keep the condition projection, timestep MLP, addition, SiLU and
+        modulation projections in their original order and precision. Only
+        the independent timestep rows are batched. Nothing is cached across
+        solves, so changing conditions, schedules or dtypes cannot reuse state.
+        """
+        weight = self.noisy["s"] if self.noisy["q"] else self.noisy["w"]
+        # Match matmul's promotion without evaluating a sample projection.
+        activation_dtype = (
+            mx.zeros((), dtype=dtype) + mx.zeros((), dtype=weight.dtype)
+        ).dtype
+        half = self.freq_dim // 2
+        freqs = mx.exp(-math.log(10000) * mx.arange(half, dtype=mx.float32) / half)
+        args = timesteps[:, None].astype(mx.float32) * freqs[None]
+        emb = mx.concatenate([mx.cos(args), mx.sin(args)], axis=-1).astype(
+            activation_dtype
+        )
+        t = _mm(nn.silu(_mm(emb, self.t0)), self.t2)
+        c = _mm(condition, self.cond)[None] + t[:, None, :]
+        # One 2D matmul per projection shares its weights across all timesteps
+        # and CFG branches instead of dispatching separate tiny batches.
+        activated = nn.silu(c).reshape(-1, self.H)
+        layers = tuple(
+            _mm(activated, adaln).reshape(*c.shape[:-1], 3 * self.H)
+            for adaln, *_ in self.layers
+        )
+        final = _mm(activated, self.final_adaln).reshape(*c.shape[:-1], 2 * self.H)
+        return PreparedDiffusionConditioning(layers, final)
+
+    def forward_prepared(
+        self, noisy: mx.array, conditioning: PreparedDiffusionConditioning, step: int,
+    ) -> mx.array:
+        """Evaluate one sample using this timestep's prepared modulations."""
+        H = self.H
+        x = _mm(noisy, self.noisy)
+        for (_, norm_w, gate, up, down), prepared in zip(
+            self.layers, conditioning.layers, strict=True
+        ):
+            mods = prepared[step]
+            shift, scale, g = mods[..., :H], mods[..., H:2*H], mods[..., 2*H:3*H]
+            h = mx.fast.rms_norm(x, norm_w, 1e-5) * (1 + scale) + shift
+            x = x + g * _mm(nn.silu(_mm(h, gate)) * _mm(h, up), down)
+        mods = conditioning.final[step]
+        shift, scale = mods[..., :H], mods[..., H:]
+        h = mx.fast.rms_norm(x, mx.ones(H, dtype=x.dtype), 1e-5) * (1 + scale) + shift
+        return _mm(h, self.final_linear)
 
     def __call__(self, noisy, timestep, condition):
         H = self.H

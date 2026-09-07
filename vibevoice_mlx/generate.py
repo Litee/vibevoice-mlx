@@ -15,7 +15,7 @@ import mlx.nn as nn
 
 from .model import KVCache, VibeVoiceConfig, VibeVoiceModel, compute_rope
 from .streaming_vae import StreamingVAEDecoder
-from .fast_forward import FastLM, FastDiffusionHead
+from .fast_forward import FastLM, FastDiffusionHead, PreparedDiffusionConditioning
 
 
 # ---------------------------------------------------------------------------
@@ -122,15 +122,43 @@ def _validate_diffusion_steps(num_steps: int) -> int:
     return int(num_steps)
 
 
-def _dpm_denoise_step(diff_head, sample, batched_cond, s, cfg_scale, dtype):
+def _prepare_diffusion_conditioning(
+    diff_head: Callable,
+    condition: mx.array,
+    timesteps: np.ndarray,
+    dtype: mx.Dtype,
+) -> PreparedDiffusionConditioning | None:
+    # Subclasses and arbitrary callbacks may override the denoiser's behavior.
+    # Optimize only the concrete built-in head; preserve every other call path.
+    if type(diff_head) is not FastDiffusionHead:
+        return None
+    return diff_head.prepare_conditioning(
+        condition, mx.array(timesteps).astype(dtype), dtype=dtype,
+    )
+
+
+def _dpm_denoise_step(
+    diff_head: Callable,
+    sample: mx.array,
+    batched_cond: mx.array,
+    s: int,
+    cfg_scale: float,
+    dtype: mx.Dtype,
+    *,
+    prepared: PreparedDiffusionConditioning | None = None,
+    step: int = 0,
+) -> mx.array:
     """Run diffusion head with batched CFG, return x0 prediction.
 
     No mx.eval — relies on MLX lazy evaluation to batch the entire
     diffusion solve into fewer GPU submissions.
     """
     batched_sample = mx.concatenate([sample, sample], axis=0).astype(dtype)
-    ts_mx = mx.array([float(s)]).astype(dtype)
-    v_batched = diff_head(batched_sample, ts_mx, batched_cond)
+    if prepared is None:
+        ts_mx = mx.array([float(s)]).astype(dtype)
+        v_batched = diff_head(batched_sample, ts_mx, batched_cond)
+    else:
+        v_batched = diff_head.forward_prepared(batched_sample, prepared, step)
 
     v_cond = v_batched[0:1].astype(mx.float32)
     v_uncond = v_batched[1:2].astype(mx.float32)
@@ -166,6 +194,9 @@ def dpm_solver_2m(
     batched_cond = mx.concatenate([
         condition.astype(dtype), neg_condition.astype(dtype)
     ], axis=0)
+    prepared = _prepare_diffusion_conditioning(
+        diff_head, batched_cond, t_schedule[:-1], dtype,
+    )
 
     x0_list = []
 
@@ -173,7 +204,10 @@ def dpm_solver_2m(
         s = int(t_schedule[i])
         t = int(t_schedule[i + 1])
 
-        x0 = _dpm_denoise_step(diff_head, sample, batched_cond, s, cfg_scale, dtype)
+        x0 = _dpm_denoise_step(
+            diff_head, sample, batched_cond, s, cfg_scale, dtype,
+            prepared=prepared, step=i,
+        )
         # The inference endpoint is zero noise, distinct from training index 0.
         # Its first-order update returns the latest clean prediction exactly.
         if i == num_steps - 1:
@@ -256,13 +290,19 @@ def dpm_solver_sde_2m(
     batched_cond = mx.concatenate([
         condition.astype(dtype), neg_condition.astype(dtype)
     ], axis=0)
+    prepared = _prepare_diffusion_conditioning(
+        diff_head, batched_cond, timesteps, dtype,
+    )
 
     x0_list = []
 
     for i in range(num_steps):
         s_ts = int(timesteps[i])
 
-        x0 = _dpm_denoise_step(diff_head, sample, batched_cond, s_ts, cfg_scale, dtype)
+        x0 = _dpm_denoise_step(
+            diff_head, sample, batched_cond, s_ts, cfg_scale, dtype,
+            prepared=prepared, step=i,
+        )
         x0_list.append(x0)
 
         h = float(lambdas[i + 1] - lambdas[i])
