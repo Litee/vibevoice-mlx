@@ -38,7 +38,7 @@ _LAMBDA_NP = np.log(_ALPHA_NP / np.maximum(_SIGMA_NP, 1e-10))
 
 @dataclass
 class GenerationOptions:
-    solver: str = "dpm"            # "ddpm", "dpm", or "sde"
+    solver: str = "dpm"            # "dpm" or "sde"
     diffusion_steps: int = 10      # DPM-Solver++ steps
     cfg_scale: float = 1.3         # Classifier-free guidance
     max_speech_tokens: int = 200   # Safety limit
@@ -287,6 +287,10 @@ def generate(
     if opts is None:
         opts = GenerationOptions()
 
+    solver_fn = {"dpm": dpm_solver_2m, "sde": dpm_solver_sde_2m}.get(opts.solver)
+    if solver_fn is None:
+        raise ValueError(f"Unsupported solver {opts.solver!r}; choose 'dpm' or 'sde'.")
+
     config = model.config
     dtype = mx.float16
     metrics = GenerationMetrics(
@@ -413,7 +417,6 @@ def generate(
             # Diffusion (fast path — no nn.Module dispatch)
             t0 = time.perf_counter()
             condition = hidden[:, 0:1, :].reshape(1, config.hidden_size)
-            solver_fn = dpm_solver_sde_2m if opts.solver == "sde" else dpm_solver_2m
             sample = solver_fn(
                 fast_diff, condition, neg_condition, opts.cfg_scale,
                 num_steps=opts.diffusion_steps,

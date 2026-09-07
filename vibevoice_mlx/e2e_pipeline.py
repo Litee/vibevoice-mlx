@@ -463,7 +463,7 @@ def main():
                         help="Quantization for LLM backbone (4=INT4, 8=INT8)")
     parser.add_argument("--quantize-diffusion", action="store_true",
                         help="Also INT8 quantize the diffusion head (faster, slight quality loss)")
-    parser.add_argument("--solver", type=str, default="dpm", choices=["dpm", "sde", "ddpm"],
+    parser.add_argument("--solver", type=str, default="dpm", choices=["dpm", "sde"],
                         help="Diffusion solver (sde=stochastic DPM-Solver++, dpm=ODE DPM-Solver++)")
     parser.add_argument("--diffusion-steps", type=int, default=10,
                         help="Number of diffusion steps")
