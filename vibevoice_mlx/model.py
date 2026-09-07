@@ -140,6 +140,13 @@ class KVCache:
     def advance(self, n: int = 1) -> None:
         self.offset += n
 
+    def truncate(self, length: int) -> None:
+        """Discard a provisional suffix while retaining allocated capacity."""
+        if length < 0 or any(length > current for current in self._lengths):
+            raise ValueError("Cannot truncate beyond the populated cache prefix")
+        self._lengths = [length] * len(self._lengths)
+        self.offset = min(self.offset, length)
+
 
 # ---------------------------------------------------------------------------
 # Qwen2 layers (attention has bias on QKV, not on o_proj)
