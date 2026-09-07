@@ -86,7 +86,7 @@ def convert_model(model_id: str, output_dir: Path, tokenizer_id: str | None = No
         print(f"  Mapped {len(mapped)} weights, skipped {len(skipped)}")
 
     # Quantize if requested: load into model, quantize, then flatten back
-    quantization_meta = None
+    quantization_meta = config.quantization
     if quantize_bits is not None:
         group_size = 64 if quantize_bits == 4 else 32
         print(f"  Quantizing to INT{quantize_bits} (group_size={group_size})...")
