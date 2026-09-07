@@ -105,7 +105,24 @@ def load_voice(path: str) -> np.ndarray:
     """Load pre-encoded voice embeddings from safetensors."""
     from safetensors.numpy import load_file
     data = load_file(path)
+    if "embeddings" not in data:
+        raise ValueError(f"Voice {path!r} is missing the 'embeddings' tensor.")
     return data["embeddings"]
+
+
+def _validate_voice_embeddings(embeds: np.ndarray, hidden_size: int, source: str) -> None:
+    """Check the voice matrix without copying or changing its dtype."""
+    if not isinstance(embeds, np.ndarray) or not (
+        np.issubdtype(embeds.dtype, np.integer) or np.issubdtype(embeds.dtype, np.floating)
+    ):
+        raise ValueError(f"{source} embeddings must be a real numeric NumPy array.")
+    if embeds.ndim != 2 or embeds.shape[0] == 0 or embeds.shape[1] != hidden_size:
+        raise ValueError(
+            f"{source} embeddings must have nonempty shape (num_tokens, {hidden_size}); "
+            f"received {embeds.shape}."
+        )
+    if not np.isfinite(embeds).all():
+        raise ValueError(f"{source} embeddings contain non-finite values.")
 
 
 # ---------------------------------------------------------------------------
@@ -194,8 +211,9 @@ def tokenize_text(
 
     Args:
         speaker_embeds: Pre-encoded embeddings as list of (num_tokens, embeds)
-            where embeds is shape (num_tokens, hidden_size). Alternative to
-            ref_audio for batch synthesis with pre-encoded voices.
+            where embeds is a finite real numeric NumPy array of nonempty shape
+            (num_tokens, hidden_size), with a matching positive integer count.
+            Alternative to ref_audio for batch synthesis with pre-encoded voices.
     """
     if tokenizer is None:
         from transformers import AutoTokenizer
@@ -208,13 +226,25 @@ def tokenize_text(
     voice_refs = None
     if speaker_embeds is not None and len(speaker_embeds) > 0:
         voice_refs = []
-        for num_tokens, embeds in speaker_embeds:
-            voice_refs.append((num_tokens, np.zeros(0, dtype=np.float32), embeds))
+        for speaker_id, (num_tokens, embeds) in enumerate(speaker_embeds):
+            _validate_voice_embeddings(embeds, config.hidden_size, f"Speaker {speaker_id}")
+            if (
+                not isinstance(num_tokens, (int, np.integer))
+                or isinstance(num_tokens, bool)
+                or num_tokens <= 0
+                or num_tokens != embeds.shape[0]
+            ):
+                raise ValueError(
+                    f"Speaker {speaker_id} num_tokens must be a positive integer matching "
+                    f"the {embeds.shape[0]} embedding rows; received {num_tokens!r}."
+                )
+            voice_refs.append((int(num_tokens), np.zeros(0, dtype=np.float32), embeds))
     elif ref_audio is not None and len(ref_audio) > 0:
         voice_refs = []
         for audio_path in ref_audio:
             if audio_path.endswith(".safetensors"):
                 embeds = load_voice(audio_path)
+                _validate_voice_embeddings(embeds, config.hidden_size, f"Voice {audio_path!r}")
                 num_vae_tokens = embeds.shape[0]
                 wav = np.zeros(0, dtype=np.float32)
             else:
