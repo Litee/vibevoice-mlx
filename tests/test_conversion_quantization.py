@@ -200,3 +200,122 @@ def test_full_precision_conversion_still_matches_runtime_quantization(
     np.testing.assert_array_equal(
         logits(converted, converted_config), logits(runtime, runtime_config)
     )
+
+
+@pytest.mark.parametrize("quantization", [None], indirect=True)
+@pytest.mark.parametrize("bits", [4, 8])
+@pytest.mark.parametrize("existing_output", [False, True])
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "model.layers.0.self_attn.q_proj.weight",
+        "model.layers.0.self_attn.q_proj.bias",
+        "model.layers.0.",
+        "model.norm.weight",
+        "acoustic_connector.fc1.bias",
+        "semantic_connector.fc2.weight",
+        "diffusion_head.cond_proj.weight",
+    ],
+)
+def test_quantized_conversion_rejects_missing_weights_without_publishing(
+    checkpoint: Path,
+    tmp_path: Path,
+    bits: int,
+    existing_output: bool,
+    missing: str,
+) -> None:
+    weights_path = checkpoint / "model.safetensors"
+    weights = mx.load(str(weights_path))
+    removed = [name for name in weights if name.startswith(missing)]
+    assert removed
+    for name in removed:
+        del weights[name]
+    mx.eval(weights)
+    mx.save_safetensors(str(weights_path), weights)
+    output = tmp_path / "converted"
+    previous = {
+        "config.json": b'{"previous": true}',
+        "model.safetensors": b"previous checkpoint",
+        "notes.txt": b"user notes",
+    }
+    if existing_output:
+        output.mkdir()
+        for name, content in previous.items():
+            (output / name).write_bytes(content)
+
+    with pytest.raises(ValueError, match=missing):
+        convert_model(
+            str(checkpoint), output, tokenizer_id=str(checkpoint), quantize_bits=bits
+        )
+
+    if existing_output:
+        assert {path.name: path.read_bytes() for path in output.iterdir()} == previous
+    else:
+        assert not output.exists()
+
+
+@pytest.mark.parametrize("quantization", [None], indirect=True)
+@pytest.mark.parametrize("checkpoint", [False], indirect=True)
+@pytest.mark.parametrize("bits", [4, 8])
+def test_quantized_conversion_requires_untied_lm_head(
+    checkpoint: Path, tmp_path: Path, bits: int
+) -> None:
+    weights_path = checkpoint / "model.safetensors"
+    weights = mx.load(str(weights_path))
+    del weights["lm_head.weight"]
+    mx.eval(weights)
+    mx.save_safetensors(str(weights_path), weights)
+    output = tmp_path / "converted"
+
+    with pytest.raises(ValueError, match="lm_head.weight"):
+        convert_model(
+            str(checkpoint), output, tokenizer_id=str(checkpoint), quantize_bits=bits
+        )
+
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("quantization", [None], indirect=True)
+@pytest.mark.parametrize("bits", [4, 8])
+@pytest.mark.parametrize("existing_output", [False, True])
+@pytest.mark.parametrize("invalid_parameter", ["unexpected", "wrong_shape"])
+def test_new_quantization_rejects_invalid_parameters_without_publishing(
+    checkpoint: Path,
+    tmp_path: Path,
+    bits: int,
+    existing_output: bool,
+    invalid_parameter: str,
+) -> None:
+    # Only new quantization constructs model parameters. Re-exporting an
+    # existing checkpoint preserves its source tensors instead.
+    weights_path = checkpoint / "model.safetensors"
+    weights = mx.load(str(weights_path))
+    if invalid_parameter == "unexpected":
+        name = "model.layers.0.self_attn.unexpected.weight"
+        weights[name] = mx.ones((64, 64), dtype=mx.float16)
+    else:
+        name = "model.layers.0.self_attn.q_proj.weight"
+        weights[name] = weights[name][:32]
+    mx.eval(weights)
+    mx.save_safetensors(str(weights_path), weights)
+    output = tmp_path / "converted"
+    previous = {
+        "config.json": b'{"previous": true}',
+        "model.safetensors": b"previous checkpoint",
+        "notes.txt": b"user notes",
+    }
+    if existing_output:
+        output.mkdir()
+        for filename, content in previous.items():
+            (output / filename).write_bytes(content)
+
+    with pytest.raises(ValueError) as error:
+        convert_model(
+            str(checkpoint), output, tokenizer_id=str(checkpoint), quantize_bits=bits
+        )
+
+    assert name in str(error.value)
+    if existing_output:
+        assert {path.name: path.read_bytes() for path in output.iterdir()} == previous
+    else:
+        assert not output.exists()
