@@ -15,6 +15,7 @@ from dataclasses import dataclass
 
 import mlx.core as mx
 import mlx.nn as nn
+from mlx.utils import tree_flatten
 
 from .model import KVCache, VibeVoiceModel, VibeVoiceConfig, apply_rope
 
@@ -326,6 +327,10 @@ class FastDiffusionHead:
 
     def __init__(self, model: VibeVoiceModel, config: VibeVoiceConfig):
         dh = model.diffusion_head
+        self._fp16_parameters = all(
+            value.dtype in (mx.float16, mx.uint32)
+            for _, value in tree_flatten(dh.parameters())
+        )
         self.noisy = _extract_linear(dh.noisy_images_proj)
         self.cond = _extract_linear(dh.cond_proj)
         self.t0 = _extract_linear(dh.t_embedder.mlp[0])
@@ -396,6 +401,14 @@ class FastDiffusionHead:
         shift, scale = mods[..., :H], mods[..., H:]
         h = mx.fast.rms_norm(x, mx.ones(H, dtype=x.dtype), 1e-5) * (1 + scale) + shift
         return _mm(h, self.final_linear)
+    def supports_single_branch(self, dtype: mx.Dtype) -> bool:
+        """Keep historical batching for FP32 and mixed-precision computation.
+
+        Metal's FP32 matrix-vector and matrix-matrix kernels can differ enough
+        to alter the trajectory. FP16 parameters include packed INT4/INT8
+        weights with FP16 scales and biases; uint32 contains only packed bits.
+        """
+        return dtype == mx.float16 and self._fp16_parameters
 
     def __call__(self, noisy, timestep, condition):
         H = self.H
