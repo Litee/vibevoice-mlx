@@ -419,6 +419,7 @@ def generate(
 
     use_evolving_cfg = opts.cfg_scale > 1.0
     prepared_neg_hidden = None
+    provisional_neg_hidden = None
 
     # The negative branch consumes the previous input only when diffusion runs.
     # Only allocate when CFG is active to save memory.
@@ -633,6 +634,15 @@ def generate(
 
     # Close progress bar
     pbar.close()
+
+    # Release autoregressive state before final VAE materialization. Any latent
+    # graphs that depend on these buffers retain the values they need.
+    cache.reset()
+    if neg_cache is not None:
+        neg_cache.reset()
+    hidden = None
+    prepared_neg_hidden = None
+    provisional_neg_hidden = None
 
     # Reuse continuous feedback audio; batch-decode only without semantic feedback.
     if all_latents:
