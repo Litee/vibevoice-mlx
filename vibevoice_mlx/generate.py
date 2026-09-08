@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Callable, Literal, Optional
 
 from tqdm import tqdm
 
@@ -53,6 +53,14 @@ class GenerationOptions:
     seed: int = 42
 
 
+GenerationStopReason = Literal[
+    "eos",
+    "speech_end",
+    "max_speech_tokens",
+    "max_generation_tokens",
+]
+
+
 @dataclass
 class GenerationMetrics:
     name: str = ""
@@ -61,6 +69,7 @@ class GenerationMetrics:
     num_speech_tokens: int = 0
     num_text_tokens: int = 0
     audio_samples: int = 0
+    stop_reason: GenerationStopReason | None = None
 
     def record(self, component: str, ms: float):
         if component not in self.timings:
@@ -77,6 +86,7 @@ class GenerationMetrics:
         result["speech_tokens"] = self.num_speech_tokens
         result["text_tokens"] = self.num_text_tokens
         result["audio_samples"] = self.audio_samples
+        result["stop_reason"] = self.stop_reason
         result["audio_seconds"] = self.audio_samples / 24000
         if self.audio_samples > 0 and self.total_time > 0:
             audio_ms = self.audio_samples / 24000 * 1000
@@ -474,11 +484,6 @@ def generate(
     rng = np.random.RandomState(opts.seed)
     position = n_prefill
 
-    # Single-segment models stop on speech_end; multi-segment only on eos
-    stop_tokens = {config.eos_id}
-    if config.single_segment:
-        stop_tokens.add(config.speech_end_id)
-
     # Setup progress bar — use estimated total if provided, else rough guess
     pbar = tqdm(
         total=estimated_total if estimated_total is not None else n_prefill,
@@ -487,9 +492,14 @@ def generate(
     )
 
     for step in range(opts.max_speech_tokens * 3):
-        if next_token in stop_tokens:
+        if next_token == config.eos_id:
+            metrics.stop_reason = "eos"
+            break
+        if config.single_segment and next_token == config.speech_end_id:
+            metrics.stop_reason = "speech_end"
             break
         if metrics.num_speech_tokens >= opts.max_speech_tokens:
+            metrics.stop_reason = "max_speech_tokens"
             break
 
         negative_lm_ms = 0.0
@@ -618,6 +628,8 @@ def generate(
         # Free MLX Metal buffer pool every 10 steps to prevent unbounded growth.
         if step % 10 == 0:
             mx.clear_cache()
+    else:
+        metrics.stop_reason = "max_generation_tokens"
 
     # Close progress bar
     pbar.close()
