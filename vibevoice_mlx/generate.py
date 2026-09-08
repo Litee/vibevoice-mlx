@@ -146,7 +146,6 @@ def _prepare_diffusion_conditioning(
         condition, mx.array(timesteps).astype(dtype), dtype=dtype,
     )
 
-
 def _dpm_denoise_step(
     diff_head: Callable,
     sample: mx.array,
@@ -157,22 +156,28 @@ def _dpm_denoise_step(
     *,
     prepared: PreparedDiffusionConditioning | None = None,
     step: int = 0,
+    single_branch: bool = False,
 ) -> mx.array:
-    """Run diffusion head with batched CFG, return x0 prediction.
+    """Run diffusion head with optional batched CFG, return x0 prediction.
 
     No mx.eval — relies on MLX lazy evaluation to batch the entire
     diffusion solve into fewer GPU submissions.
     """
-    batched_sample = mx.concatenate([sample, sample], axis=0).astype(dtype)
+    batched_sample = (
+        sample if single_branch else mx.concatenate([sample, sample], axis=0)
+    ).astype(dtype)
     if prepared is None:
         ts_mx = mx.array([float(s)]).astype(dtype)
         v_batched = diff_head(batched_sample, ts_mx, batched_cond)
     else:
         v_batched = diff_head.forward_prepared(batched_sample, prepared, step)
 
-    v_cond = v_batched[0:1].astype(mx.float32)
-    v_uncond = v_batched[1:2].astype(mx.float32)
-    v = v_uncond + cfg_scale * (v_cond - v_uncond)
+    if single_branch:
+        v = v_batched.astype(mx.float32)
+    else:
+        v_cond = v_batched[0:1].astype(mx.float32)
+        v_uncond = v_batched[1:2].astype(mx.float32)
+        v = v_uncond + cfg_scale * (v_cond - v_uncond)
 
     alpha_s = float(_ALPHA_NP[s])
     sigma_s = float(_SIGMA_NP[s])
@@ -201,7 +206,14 @@ def dpm_solver_2m(
     key = mx.random.key(seed)
     sample = mx.random.normal(shape=(1, VAE_DIM), key=key).astype(mx.float32)
 
-    batched_cond = mx.concatenate([
+    # Arbitrary callbacks/subclasses may couple batch rows or inspect shapes.
+    # Only the concrete built-in head is known to process branches independently.
+    single_branch = (
+        cfg_scale == 1.0
+        and type(diff_head) is FastDiffusionHead
+        and diff_head.supports_single_branch(dtype)
+    )
+    batched_cond = condition.astype(dtype) if single_branch else mx.concatenate([
         condition.astype(dtype), neg_condition.astype(dtype)
     ], axis=0)
     prepared = _prepare_diffusion_conditioning(
@@ -217,6 +229,7 @@ def dpm_solver_2m(
         x0 = _dpm_denoise_step(
             diff_head, sample, batched_cond, s, cfg_scale, dtype,
             prepared=prepared, step=i,
+            single_branch=single_branch,
         )
         # The inference endpoint is zero noise, distinct from training index 0.
         # Its first-order update returns the latest clean prediction exactly.
@@ -297,7 +310,12 @@ def dpm_solver_sde_2m(
     lambdas = np.log(np.maximum(alphas, 1e-10)) - np.log(np.maximum(sigma_vals, 1e-10))
     lambdas[-1] = np.inf  # sigma=0 at last position
 
-    batched_cond = mx.concatenate([
+    single_branch = (
+        cfg_scale == 1.0
+        and type(diff_head) is FastDiffusionHead
+        and diff_head.supports_single_branch(dtype)
+    )
+    batched_cond = condition.astype(dtype) if single_branch else mx.concatenate([
         condition.astype(dtype), neg_condition.astype(dtype)
     ], axis=0)
     prepared = _prepare_diffusion_conditioning(
@@ -312,6 +330,7 @@ def dpm_solver_sde_2m(
         x0 = _dpm_denoise_step(
             diff_head, sample, batched_cond, s_ts, cfg_scale, dtype,
             prepared=prepared, step=i,
+            single_branch=single_branch,
         )
         x0_list.append(x0)
 
