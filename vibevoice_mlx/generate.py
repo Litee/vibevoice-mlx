@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Literal, Optional
@@ -13,7 +14,9 @@ import numpy as np
 import mlx.core as mx
 import mlx.nn as nn
 
-from .model import KVCache, VibeVoiceConfig, VibeVoiceModel, compute_rope
+from .model import KVCache, VAEDecoder, VibeVoiceConfig, VibeVoiceModel, compute_rope
+from .streaming_vae import DEPTHS as STREAMING_VAE_DEPTHS
+from .streaming_vae import RATIOS as STREAMING_VAE_RATIOS
 from .streaming_vae import StreamingVAEDecoder
 from .fast_forward import FastLM, FastDiffusionHead, PreparedDiffusionConditioning
 
@@ -24,6 +27,7 @@ from .fast_forward import FastLM, FastDiffusionHead, PreparedDiffusionConditioni
 
 DDPM_STEPS = 1000
 VAE_DIM = 64
+_FINAL_VAE_CHUNK_TOKENS = 32
 
 _AC64 = np.cos((np.arange(DDPM_STEPS + 1, dtype=np.float64) / DDPM_STEPS + 0.008) / 1.008 * np.pi / 2) ** 2
 # Discretize cosine intervals before taking the cumulative product. The beta
@@ -663,7 +667,7 @@ def generate(
     prepared_neg_hidden = None
     provisional_neg_hidden = None
 
-    # Reuse continuous feedback audio; batch-decode only without semantic feedback.
+    # Reuse continuous feedback audio; bound final VAE activations when batch decoding.
     if all_latents:
         t0 = time.perf_counter()
         if streaming_decoder is not None:
@@ -671,7 +675,37 @@ def generate(
                 audio_out = np.array(mx.concatenate(audio_chunks))
             else:
                 audio_out = np.concatenate(audio_chunks)
+        elif (
+            type(model.vae_decoder) is VAEDecoder
+            and len(model.vae_decoder.stages) == len(STREAMING_VAE_DEPTHS)
+            and all(
+                len(stage) == depth
+                for stage, depth in zip(
+                    model.vae_decoder.stages,
+                    STREAMING_VAE_DEPTHS,
+                    strict=True,
+                )
+            )
+            and len(model.vae_decoder.upsample_convs) == len(STREAMING_VAE_RATIOS)
+            and len(all_latents) > _FINAL_VAE_CHUNK_TOKENS
+        ):
+            final_decoder = StreamingVAEDecoder(model.vae_decoder)
+            samples_per_token = math.prod(
+                stride for _, _, stride in model.vae_decoder.upsample_convs
+            )
+            audio_out = np.empty(len(all_latents) * samples_per_token, dtype=np.float32)
+            for start in range(0, len(all_latents), _FINAL_VAE_CHUNK_TOKENS):
+                latent_chunk = mx.concatenate(
+                    all_latents[start:start + _FINAL_VAE_CHUNK_TOKENS], axis=0
+                ).T[None, :, :].astype(dtype)
+                audio_chunk = final_decoder(latent_chunk)
+                # Evaluate caches too, so subsequent chunks retain only state,
+                # not the unevaluated graph of preceding decoder activations.
+                mx.eval(audio_chunk, *final_decoder.caches.values())
+                offset = start * samples_per_token
+                audio_out[offset:offset + audio_chunk.size] = np.array(audio_chunk).reshape(-1)
         else:
+            # Keep short inputs and arbitrary/custom decoder callables unchanged.
             full_latent = mx.concatenate(all_latents, axis=0).T[None, :, :].astype(dtype)
             full_audio = model.vae_decoder(full_latent)
             mx.eval(full_audio)
