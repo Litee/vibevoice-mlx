@@ -729,7 +729,10 @@ def main():
         sf.write(args.output, audio, SAMPLE_RATE)
         print(f"Saved to {args.output}")
     else:
-        print("Warning: No audio generated")
+        parser.exit(
+            status=1,
+            message="Error: No audio generated; output file was not written.\n",
+        )
 
 
 if __name__ == "__main__":

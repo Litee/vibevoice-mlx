@@ -7,6 +7,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 import mlx.core as mx
+import numpy as np
 import pytest
 from checkpoint_helpers import tiny_vae_weights
 from mlx.utils import tree_flatten
@@ -17,6 +18,7 @@ from transformers import PreTrainedTokenizerFast, dynamic_module_utils
 import convert
 from vibevoice_mlx import e2e_pipeline
 from vibevoice_mlx.e2e_pipeline import tokenize_text
+from vibevoice_mlx.generate import GenerationMetrics
 from vibevoice_mlx.model import VibeVoiceConfig, VibeVoiceModel
 
 
@@ -136,6 +138,14 @@ def _run_route(
         assert tokenize_text("Hello", str(saved), VibeVoiceConfig())
     elif route == "inference":
         monkeypatch.setattr(
+            e2e_pipeline,
+            "generate",
+            lambda **kwargs: (
+                np.zeros(1, dtype=np.float32),
+                GenerationMetrics(audio_samples=1),
+            ),
+        )
+        monkeypatch.setattr(
             sys,
             "argv",
             [
@@ -147,8 +157,8 @@ def _run_route(
                 "--text",
                 "Hello",
                 "--no-semantic",
-                "--max-speech-tokens",
-                "0",
+                "--output",
+                str(output / "speech.wav"),
             ],
         )
         e2e_pipeline.main()
