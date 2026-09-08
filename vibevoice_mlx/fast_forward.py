@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from importlib.metadata import version
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -266,7 +267,7 @@ class FastLM:
 
     def prefill(
         self, embeds: mx.array, cos: mx.array, sin: mx.array,
-        mask: mx.array, cache: KVCache,
+        mask: mx.array | str, cache: KVCache,
     ) -> mx.array:
         """Batched prefill (Q>1) with causal mask. Same as forward but with mask."""
         NH, NKV, HD, H = self.NH, self.NKV, self.HD, self.H
@@ -274,6 +275,16 @@ class FastLM:
         eps = self.eps
         h = embeds
         cache.reset()
+
+        if isinstance(mask, str) and mask == "causal":
+            # Native causal masks were added in MLX 0.24. Decide before calling
+            # attention so unrelated TypeErrors always propagate unchanged.
+            mlx_release = tuple(int(part) for part in version("mlx").split(".")[:2])
+            if mlx_release < (0, 24):
+                length = embeds.shape[1]
+                mask = mx.triu(
+                    mx.full((length, length), float("-inf"), dtype=embeds.dtype), k=1
+                )
 
         for li, d in enumerate(self.layers):
             res = h

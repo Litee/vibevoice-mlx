@@ -470,10 +470,8 @@ def generate(
 
     positions = mx.arange(n_prefill, dtype=mx.float32)
     cos_prefill, sin_prefill = compute_rope(positions, config.head_dim, config.rope_theta)
-    causal_mask = mx.triu(mx.full((n_prefill, n_prefill), float("-inf"), dtype=dtype), k=1)
-
     cache = KVCache(NL)
-    hidden = fast_lm.prefill(prefill_embeds, cos_prefill, sin_prefill, causal_mask, cache)
+    hidden = fast_lm.prefill(prefill_embeds, cos_prefill, sin_prefill, "causal", cache)
     mx.eval(hidden, *cache.keys, *cache.values)
     hidden = hidden[:, -1:, :]
 
