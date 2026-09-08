@@ -28,6 +28,7 @@ import mlx.core as mx
 
 from .generate import (
     GenerationOptions,
+    GenerationStopReason,
     MLXSemanticCallback,
     _validate_cfg_scale,
     _validate_diffusion_steps,
@@ -49,6 +50,16 @@ SAMPLE_RATE = 24000
 VOICE_CLONE_SAMPLE_SECS = 10
 VOICE_CLONE_SAMPLES = SAMPLE_RATE * VOICE_CLONE_SAMPLE_SECS  # 240000
 SPEECH_TOK_COMPRESS_RATIO = 3200  # samples per VAE token
+
+
+def _generation_stop_warning(reason: GenerationStopReason | None) -> str | None:
+    if reason == "max_speech_tokens":
+        return (
+            "Generation reached the speech token limit; saved audio may be incomplete."
+        )
+    if reason == "max_generation_tokens":
+        return "Generation reached the generation token limit; saved audio may be incomplete."
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -679,6 +690,10 @@ def main():
     summary = metrics.summary()
     print(f"  Generated {metrics.num_speech_tokens} speech tokens in {gen_time:.0f}ms")
     print(f"  Audio: {summary['audio_seconds']:.2f}s ({metrics.audio_samples} samples)")
+
+    stop_warning = _generation_stop_warning(metrics.stop_reason)
+    if stop_warning is not None:
+        print(f"Warning: {stop_warning}")
 
     if "diffusion_total_ms" in summary:
         print(f"  Diffusion: {summary['diffusion_total_ms']:.0f}ms total "
