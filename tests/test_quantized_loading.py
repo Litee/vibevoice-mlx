@@ -74,6 +74,186 @@ def save_checkpoint(
     )
 
 
+def test_runtime_quantizes_and_evaluates_each_layer_before_loading_next(
+    model: VibeVoiceModel,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    save_checkpoint(tmp_path, model, checkpoint_weights(model, prequantized=False))
+    events: list[str] = []
+    loaded_model: VibeVoiceModel | None = None
+    quantized_layer: int | None = None
+    quantized_parameter_ids: set[int] = set()
+    original_load_weights = VibeVoiceModel.load_weights
+    original_quantize = nn.quantize
+    original_eval = mx.eval
+
+    def track_load_weights(
+        self: VibeVoiceModel,
+        weights: list[tuple[str, mx.array]],
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        nonlocal loaded_model
+        loaded_model = self
+        names = [name for name, _ in weights]
+        if any(name.startswith("model.layers.1.") for name in names):
+            assert events[-2:] == ["quantize:0", "eval:0"]
+        original_load_weights(self, weights, *args, **kwargs)
+
+    def track_quantize(module: nn.Module, *args: object, **kwargs: object) -> None:
+        nonlocal quantized_layer, quantized_parameter_ids
+        original_quantize(module, *args, **kwargs)
+        if loaded_model is not None:
+            for index, layer in enumerate(loaded_model.model.layers):
+                if module is layer:
+                    quantized_layer = index
+                    quantized_parameter_ids = {
+                        id(value) for _, value in tree_flatten(layer.parameters())
+                    }
+                    events.append(f"quantize:{index}")
+                    break
+
+    def track_eval(*values: object) -> None:
+        nonlocal quantized_layer
+        original_eval(*values)
+        evaluated_ids = {id(value) for _, value in tree_flatten(values)}
+        if quantized_layer is not None and quantized_parameter_ids <= evaluated_ids:
+            events.append(f"eval:{quantized_layer}")
+            quantized_layer = None
+
+    monkeypatch.setattr(VibeVoiceModel, "load_weights", track_load_weights)
+    monkeypatch.setattr(nn, "quantize", track_quantize)
+    monkeypatch.setattr(mx, "eval", track_eval)
+
+    loaded, _ = load_model(str(tmp_path), quantize_bits=4)
+
+    assert isinstance(loaded.model.layers[0].self_attn.q_proj, nn.QuantizedLinear)
+    assert events[:4] == ["quantize:0", "eval:0", "quantize:1", "eval:1"]
+
+
+@pytest.mark.parametrize("bits", [4, 8])
+@pytest.mark.parametrize("source_dtype", [mx.float16, mx.bfloat16, mx.float32])
+def test_layerwise_runtime_quantization_matches_whole_model_exactly(
+    model: VibeVoiceModel,
+    tmp_path: Path,
+    bits: int,
+    source_dtype: mx.Dtype,
+) -> None:
+    weights = checkpoint_weights(model, prequantized=False)
+    weights = {
+        name: value.astype(source_dtype)
+        if value.dtype in (mx.float16, mx.bfloat16, mx.float32)
+        else value
+        for name, value in weights.items()
+    }
+    model.load_weights(list(weights.items()))
+    save_checkpoint(tmp_path, model, weights)
+    nn.quantize(
+        model.model,
+        bits=bits,
+        group_size=64 if bits == 4 else 32,
+        class_predicate=lambda _, layer: isinstance(layer, nn.Linear),
+    )
+
+    def cast_bfloat16(parameters: object) -> object:
+        if isinstance(parameters, dict):
+            return {name: cast_bfloat16(value) for name, value in parameters.items()}
+        if isinstance(parameters, list):
+            return [cast_bfloat16(value) for value in parameters]
+        if isinstance(parameters, mx.array) and parameters.dtype == mx.bfloat16:
+            return parameters.astype(mx.float16)
+        return parameters
+
+    model.update(cast_bfloat16(model.parameters()))
+    expected = dict(tree_flatten(model.parameters()))
+
+    loaded, _ = load_model(str(tmp_path), quantize_bits=bits)
+    actual = dict(tree_flatten(loaded.parameters()))
+
+    assert actual.keys() == expected.keys()
+    for name, expected_parameter in expected.items():
+        actual_parameter = actual[name]
+        assert actual_parameter.dtype == expected_parameter.dtype
+        np.testing.assert_array_equal(
+            np.array(actual_parameter), np.array(expected_parameter), err_msg=name
+        )
+
+
+def test_runtime_validation_finishes_before_quantizing_any_layer(
+    model: VibeVoiceModel,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    weights = checkpoint_weights(model, prequantized=False)
+    name = "model.layers.1.self_attn.q_proj.weight"
+    weights[name] = weights[name][:-1]
+    save_checkpoint(tmp_path, model, weights)
+    quantize_calls = 0
+    original_quantize = nn.quantize
+
+    def track_quantize(*args: object, **kwargs: object) -> None:
+        nonlocal quantize_calls
+        quantize_calls += 1
+        original_quantize(*args, **kwargs)
+
+    monkeypatch.setattr(nn, "quantize", track_quantize)
+
+    with pytest.raises(ValueError, match=name):
+        load_model(str(tmp_path), quantize_bits=4)
+
+    assert quantize_calls == 0
+
+
+def test_runtime_quantization_preserves_ineligible_linear_layers(
+    tmp_path: Path,
+) -> None:
+    config = VibeVoiceConfig(
+        hidden_size=96,
+        num_hidden_layers=1,
+        num_attention_heads=3,
+        num_key_value_heads=3,
+        head_dim=32,
+        intermediate_size=96,
+        vocab_size=16,
+        diffusion_layers=0,
+        speech_start_id=0,
+        speech_end_id=1,
+        speech_diffusion_id=2,
+        eos_id=3,
+    )
+    source = VibeVoiceModel(config)
+    save_checkpoint(tmp_path, source, checkpoint_weights(source, prequantized=False))
+
+    loaded, _ = load_model(str(tmp_path), quantize_bits=4)
+
+    assert isinstance(loaded.model.layers[0].self_attn.q_proj, nn.Linear)
+    assert isinstance(loaded.model.layers[0].mlp.gate_proj, nn.Linear)
+
+
+def test_runtime_quantization_supports_zero_layer_model(tmp_path: Path) -> None:
+    config = VibeVoiceConfig(
+        hidden_size=64,
+        num_hidden_layers=0,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        head_dim=32,
+        intermediate_size=64,
+        vocab_size=16,
+        diffusion_layers=0,
+        speech_start_id=0,
+        speech_end_id=1,
+        speech_diffusion_id=2,
+        eos_id=3,
+    )
+    source = VibeVoiceModel(config)
+    save_checkpoint(tmp_path, source, checkpoint_weights(source, prequantized=False))
+
+    loaded, _ = load_model(str(tmp_path), quantize_bits=4)
+
+    assert loaded.model.layers == []
+
+
 @pytest.mark.parametrize("suffix", ["weight", "scales", "biases"])
 def test_prequantized_checkpoint_requires_every_weight(
     model: VibeVoiceModel,
@@ -231,3 +411,12 @@ def test_valid_quantized_loading_preserves_model_output(
     np.testing.assert_allclose(
         np.array(actual), np.array(expected), atol=1e-6, rtol=1e-6
     )
+    expected_parameters = dict(tree_flatten(model.model.parameters()))
+    actual_parameters = dict(tree_flatten(loaded.model.parameters()))
+    assert actual_parameters.keys() == expected_parameters.keys()
+    for name, expected_parameter in expected_parameters.items():
+        actual_parameter = actual_parameters[name]
+        assert actual_parameter.dtype == expected_parameter.dtype
+        np.testing.assert_array_equal(
+            np.array(actual_parameter), np.array(expected_parameter), err_msg=name
+        )

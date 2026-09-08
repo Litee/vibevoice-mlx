@@ -407,17 +407,18 @@ def load_model(
         model.load_weights(other_weights, strict=False)
         del other_weights
 
+        group_size = 64 if quantize_bits == 4 else 32
         for layer_idx in sorted(lm_layer_weights.keys()):
             model.load_weights(lm_layer_weights[layer_idx], strict=False)
+            nn.quantize(
+                model.model.layers[layer_idx],
+                bits=quantize_bits,
+                group_size=group_size,
+                class_predicate=_quantize_predicate,
+            )
             mx.eval(model.model.layers[layer_idx].parameters())
             del lm_layer_weights[layer_idx]
         del lm_layer_weights
-
-        nn.quantize(
-            model.model, bits=quantize_bits,
-            group_size=64 if quantize_bits == 4 else 32,
-            class_predicate=_quantize_predicate,
-        )
     else:
         model.load_weights(weight_pairs)
         del weight_pairs
