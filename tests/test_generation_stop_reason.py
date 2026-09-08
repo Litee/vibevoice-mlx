@@ -1,10 +1,12 @@
 """Generation reports why autoregressive decoding stopped."""
 
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import mlx.core as mx
+import numpy as np
 import pytest
 
 from vibevoice_mlx import e2e_pipeline
@@ -114,10 +116,11 @@ def test_cli_warning_describes_incomplete_generation(
 def test_cli_prints_incomplete_generation_warning(
     reason: str,
     warns: bool,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    metrics = GenerationMetrics(stop_reason=reason)
+    metrics = GenerationMetrics(stop_reason=reason, audio_samples=1)
     monkeypatch.setattr(
         e2e_pipeline,
         "load_model",
@@ -127,10 +130,19 @@ def test_cli_prints_incomplete_generation_warning(
     monkeypatch.setattr(
         e2e_pipeline,
         "generate",
-        lambda *args, **kwargs: (mx.zeros((0,), dtype=mx.float32), metrics),
+        lambda *args, **kwargs: (np.zeros(1, dtype=np.float32), metrics),
     )
     monkeypatch.setattr(
-        sys, "argv", ["vibevoice-mlx", "--text", "Hello", "--no-semantic"]
+        sys,
+        "argv",
+        [
+            "vibevoice-mlx",
+            "--text",
+            "Hello",
+            "--no-semantic",
+            "--output",
+            str(tmp_path / "speech.wav"),
+        ],
     )
 
     e2e_pipeline.main()
