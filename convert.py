@@ -112,7 +112,7 @@ def convert_model(model_id: str, output_dir: Path, tokenizer_id: str | None = No
         if config.tie_word_embeddings:
             backbone_weights.pop("lm_head.weight", None)
 
-        model.load_weights(list(backbone_weights.items()), strict=False)
+        model.load_weights(list(backbone_weights.items()))
         nn.quantize(
             model.model, bits=quantize_bits, group_size=group_size,
             class_predicate=_quantize_predicate,
