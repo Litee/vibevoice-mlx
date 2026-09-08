@@ -138,8 +138,8 @@ def _validate_voice_embeddings(embeds: np.ndarray, hidden_size: int, source: str
 def encode_voice_reference(
     wav: np.ndarray,
     num_vae_tokens: int,
-    model,
-    config,
+    model: VibeVoiceModel,
+    config: VibeVoiceConfig,
     model_id: str,
 ) -> np.ndarray:
     """Encode reference audio to speech embeddings via pure MLX VAE encoder.
@@ -174,9 +174,17 @@ def encode_voice_reference(
             encode_voice_reference._enc_cache[cache_key] = load_vae_encoder_weights(raw)
         enc_weights = encode_voice_reference._enc_cache[cache_key]
 
-    # Pad/trim to VOICE_CLONE_SAMPLES
-    audio_padded = np.zeros(VOICE_CLONE_SAMPLES, dtype=np.float32)
-    actual_len = min(len(wav), VOICE_CLONE_SAMPLES)
+    # Each causal stride-s conv ends output t at input (t + 1) * s - 1;
+    # channel norms and FFNs do not mix time positions. Keep all left context,
+    # but skip the suffix beyond the requested tokens' 3200-sample windows.
+    # Leave zero and non-Python-integer count slicing behavior unchanged.
+    encoder_samples = VOICE_CLONE_SAMPLES
+    if isinstance(num_vae_tokens, int) and num_vae_tokens > 0:
+        encoder_samples = min(
+            num_vae_tokens, VOICE_CLONE_SAMPLES // SPEECH_TOK_COMPRESS_RATIO
+        ) * SPEECH_TOK_COMPRESS_RATIO
+    audio_padded = np.zeros(encoder_samples, dtype=np.float32)
+    actual_len = min(len(wav), encoder_samples)
     audio_padded[:actual_len] = wav[:actual_len]
 
     # Encode: (1, 1, T) → (1, T_compressed, vae_dim)
