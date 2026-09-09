@@ -17,7 +17,9 @@ import fcntl
 import hashlib
 import json
 import math
+import os
 import re
+import signal
 import statistics
 import subprocess
 import sys
@@ -49,8 +51,37 @@ def file_hash(path: str | Path | None) -> str | None:
         return None
 def safe_version(value: str) -> str | None:
     return value if re.fullmatch(r"[A-Za-z0-9.!+_-]{1,100}", value) else None
+def effective_configuration(state: dict) -> dict:
+    # Inspect the executed legacy worker, never assume its requested settings
+    # took effect. Missing/unknown state stays unknown and fails closed.
+    effective = {"quantization": None, "semantic_backend": None, "voice_reference": None}
+    if "semantic_fn" in state and state.get("sem_mode") in ("mlx", "coreml", "none"):
+        effective["semantic_backend"] = state["sem_mode"] if state["semantic_fn"] is not None else "none"
+    if "voice_embeds" in state and "voice_arg" in state:
+        voice = state["voice_arg"]
+        effective["voice_reference"] = ("cached" if voice.endswith(".safetensors") else "audio") if state["voice_embeds"] and isinstance(voice, str) else ("none" if not state["voice_embeds"] else None)
+    try:
+        import mlx.nn as nn
+        import mlx.core as mx
+        kinds = set()
+        for _, layer in state["model"].named_modules():
+            if isinstance(layer, (nn.QuantizedLinear, nn.QuantizedEmbedding)):
+                kinds.add("int" + str(layer.bits))
+            elif isinstance(layer, (nn.Linear, nn.Embedding)):
+                kinds.add("fp16" if layer.weight.dtype == mx.float16 else "unknown")
+            elif hasattr(layer, "weight") and not isinstance(layer, nn.RMSNorm):
+                kinds.add("unknown")
+        packed = kinds - {"fp16"}
+        if len(packed) == 1 and next(iter(packed)) in ("int4", "int8"):
+            effective["quantization"] = next(iter(packed))
+        elif kinds == {"fp16"}:
+            effective["quantization"] = "fp16"
+    except (ImportError, KeyError, AttributeError, TypeError, ValueError):
+        pass
+    return effective
+state = {}
 try:
-    exec(runpy.run_path("bench_compare.py")["make_script"](), {})
+    exec(runpy.run_path("bench_compare.py")["make_script"](), state)
 finally:
     # Capture before provenance hashing adds its own temporary allocations.
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
@@ -79,6 +110,7 @@ finally:
         "benchmark_source_sha256": file_hash(checkout / "bench_compare.py"),
         "model": {"snapshot_revision": revision, "config_sha256": file_hash(model / "config.json")},
         "process_lifetime_peak_rss_bytes": rss_bytes,
+        "observed_effective": effective_configuration(state),
     }))
 """
 
@@ -199,7 +231,27 @@ def source_provenance(checkout: Path) -> dict[str, Any]:
         return {"commit": None, "dirty": None, "working_tree_status_sha256": None}
 
 
-def worker_result(result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
+CONFIG_VALUES = {
+    "quantization": {"fp16", "int4", "int8"},
+    "semantic_backend": {"mlx", "coreml", "none"},
+    "voice_reference": {"audio", "cached", "none"},
+}
+
+
+def safe_configuration(value: Any) -> dict[str, str | None]:
+    """Keep only known configuration labels, never arbitrary worker strings."""
+    value = value if isinstance(value, dict) else {}
+    return {
+        key: value.get(key)
+        if isinstance(value.get(key), str) and value[key] in allowed
+        else None
+        for key, allowed in CONFIG_VALUES.items()
+    }
+
+
+def worker_result(
+    result: subprocess.CompletedProcess[str], requested: dict[str, str]
+) -> dict[str, Any]:
     record: dict[str, Any] = {
         "returncode": result.returncode,
         "stdout_sha256": digest(result.stdout.encode()),
@@ -215,6 +267,7 @@ def worker_result(result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
             raise ValueError("Expected one provenance record")
         provenance = json.loads(provenance_lines[0])
         rss = provenance.pop("process_lifetime_peak_rss_bytes")
+        observed = safe_configuration(provenance.pop("observed_effective", None))
         record["provenance"] = provenance
     except (ValueError, KeyError, TypeError, AttributeError):
         return {
@@ -249,7 +302,29 @@ def worker_result(result: subprocess.CompletedProcess[str]) -> dict[str, Any]:
             or metrics["speech_tokens"] <= 0
         ):
             raise ValueError("Empty or invalid generation")
-        return {**record, "status": "ok", "metrics": metrics, "provenance": provenance}
+        effective = safe_configuration(value.get("effective", observed))
+        reported_request = safe_configuration(value.get("requested", requested))
+        record.update(
+            requested=requested,
+            effective=effective,
+            observed_effective=observed,
+            configuration_source="worker_report"
+            if "effective" in value
+            else "executed_worker_state",
+            metrics=metrics,
+        )
+        if None in effective.values() or None in reported_request.values():
+            return {**record, "status": "unknown_configuration"}
+        if (
+            effective != requested
+            or reported_request != requested
+            or any(
+                observed[key] is not None and observed[key] != effective[key]
+                for key in observed
+            )
+        ):
+            return {**record, "status": "configuration_mismatch"}
+        return {**record, "status": "ok"}
     except (ValueError, KeyError, TypeError):
         return {**record, "status": "invalid_result"}
 
@@ -258,7 +333,11 @@ def summarize(trials: list[dict[str, Any]]) -> dict[str, Any]:
     ratios = []
     for start in range(0, len(trials), 2):
         pair = trials[start : start + 2]
-        if len(pair) == 2 and all(trial["status"] == "ok" for trial in pair):
+        if (
+            len(pair) == 2
+            and all(trial["status"] == "ok" for trial in pair)
+            and pair[0]["effective"] == pair[1]["effective"]
+        ):
             sides = {trial["side"]: trial["metrics"] for trial in pair}
             ratios.append(sides["B"]["gen_s"] / sides["A"]["gen_s"])
     return {
@@ -278,7 +357,33 @@ def summarize(trials: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def run_plan(plan: dict[str, Any], output: Path) -> dict[str, Any]:
+def run_worker(
+    command: list[str], checkout: Path, timeout: int, lock_fd: int
+) -> subprocess.CompletedProcess[str]:
+    """Inherit the flock so a surviving worker still excludes other runners."""
+    worker = subprocess.Popen(
+        command,
+        cwd=checkout,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+        pass_fds=(lock_fd,),
+    )
+    try:
+        stdout, stderr = worker.communicate(timeout=timeout)
+        return subprocess.CompletedProcess(command, worker.returncode, stdout, stderr)
+    finally:
+        # Also reap descendants after a nominal exit: a worker must not leave
+        # generation running in the background before the next trial starts.
+        try:
+            os.killpg(worker.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        worker.communicate()
+
+
+def run_plan(plan: dict[str, Any], output: Path, lock_fd: int) -> dict[str, Any]:
     """Run paired subprocesses serially and persist every outcome."""
     validate_plan(plan)
     output.mkdir(parents=True, exist_ok=False)
@@ -331,14 +436,25 @@ def run_plan(plan: dict[str, Any], output: Path) -> dict[str, Any]:
             else:
                 trial.update(
                     worker_result(
-                        subprocess.run(
+                        run_worker(
                             [sys.executable, "-c", WORKER, json.dumps(payload)],
-                            cwd=Path(plan[trial["side"]]).resolve(),
-                            capture_output=True,
-                            text=True,
-                            check=False,
+                            checkout=Path(plan[trial["side"]]).resolve(),
                             timeout=plan.get("timeout", 600),
-                        )
+                            lock_fd=lock_fd,
+                        ),
+                        requested={
+                            "quantization": f"int{payload['quantize']}"
+                            if payload["quantize"]
+                            else "fp16",
+                            "semantic_backend": payload["sem_mode"],
+                            "voice_reference": (
+                                "cached"
+                                if payload["voice_arg"].endswith(".safetensors")
+                                else "audio"
+                            )
+                            if payload["voice_arg"]
+                            else "none",
+                        },
                     )
                 )
         except subprocess.TimeoutExpired:
@@ -356,13 +472,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--plan", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
+
+    def cancel(signum: int, frame: Any) -> None:
+        raise KeyboardInterrupt
+
+    previous_sigterm = signal.signal(signal.SIGTERM, cancel)
     try:
         plan = json.loads(args.plan.read_text())
         with (Path(tempfile.gettempdir()) / "vibevoice-generation.lock").open(
             "a"
         ) as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            summary = run_plan(plan, args.output)
+            summary = run_plan(plan, args.output, lock.fileno())
         print(json.dumps(summary, allow_nan=False))
         return 0 if summary["successful_trials"] == summary["planned_trials"] else 1
     except (OSError, ValueError, TypeError):
@@ -371,6 +492,11 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    except KeyboardInterrupt:
+        print("Paired run cancelled.", file=sys.stderr)
+        return 130
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
 
 
 if __name__ == "__main__":
