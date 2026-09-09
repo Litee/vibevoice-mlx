@@ -27,15 +27,15 @@ DEFAULT_TEXT = (
 
 CONFIGS = [
     # (label, {quantize, no_semantic, coreml_semantic})
-    ("fp16",                     {}),
-    ("fp16, no-semantic",        {"no_semantic": True}),
-    ("fp16, coreml-semantic",    {"coreml_semantic": True}),
-    ("int8",                     {"quantize": 8}),
-    ("int8, no-semantic",        {"quantize": 8, "no_semantic": True}),
-    ("int8, coreml-semantic",    {"quantize": 8, "coreml_semantic": True}),
-    ("int4",                     {"quantize": 4}),
-    ("int4, no-semantic",        {"quantize": 4, "no_semantic": True}),
-    ("int4, coreml-semantic",    {"quantize": 4, "coreml_semantic": True}),
+    ("fp16", {}),
+    ("fp16, no-semantic", {"no_semantic": True}),
+    ("fp16, coreml-semantic", {"coreml_semantic": True}),
+    ("int8", {"quantize": 8}),
+    ("int8, no-semantic", {"quantize": 8, "no_semantic": True}),
+    ("int8, coreml-semantic", {"quantize": 8, "coreml_semantic": True}),
+    ("int4", {"quantize": 4}),
+    ("int4, no-semantic", {"quantize": 4, "no_semantic": True}),
+    ("int4, coreml-semantic", {"quantize": 4, "coreml_semantic": True}),
 ]
 
 
@@ -53,6 +53,14 @@ from vibevoice_mlx.e2e_pipeline import (tokenize_text, VoiceCloneData, SAMPLE_RA
 args = json.loads(sys.argv[1])
 model_id = args["model"]
 model, config = load_model(model_id, quantize_bits=args["quantize"])
+requested_quantization = f'int{args["quantize"]}' if args["quantize"] else "fp16"
+source_bits = config.quantization["bits"] if config.quantization else None
+effective_bits = source_bits or args["quantize"]
+effective_quantization = f"int{effective_bits}" if effective_bits else "fp16"
+if effective_quantization != requested_quantization:
+    raise RuntimeError(
+        f"Requested {requested_quantization} quantization, but loaded {effective_quantization}"
+    )
 
 sem_mode = args["sem_mode"]
 semantic_fn = None
@@ -64,17 +72,20 @@ if sem_mode == "coreml":
     if r is not None:
         semantic_fn, semantic_reset = r
     else:
-        sem_mode = "mlx"
+        raise RuntimeError("Requested coreml semantic backend is unavailable")
 
 if sem_mode == "mlx":
     from vibevoice_mlx.e2e_pipeline import _try_mlx_semantic
     r = _try_mlx_semantic(model, config, model_id)
     if r is not None:
         semantic_fn, semantic_reset = r
+    else:
+        raise RuntimeError("Requested mlx semantic backend is unavailable")
 
 tokenizer_name = _detect_tokenizer(model_id, config)
 voice_arg = args["voice_arg"]
 voice_list = [voice_arg] if voice_arg else None
+requested_voice = ("cached" if voice_arg.endswith(".safetensors") else "audio") if voice_arg else "none"
 
 text = args["text"]
 result = tokenize_text(text, tokenizer_name, config, ref_audio=voice_list)
@@ -95,6 +106,10 @@ if isinstance(result, VoiceCloneData):
                 voice_embeds[pos] = embeds_mx[i:i+1]
 else:
     input_ids = result
+
+effective_voice = requested_voice if voice_embeds else "none"
+if effective_voice != requested_voice:
+    raise RuntimeError("Requested voice reference did not produce voice embeddings")
 
 opts = GenerationOptions(
     solver="dpm",
@@ -127,6 +142,16 @@ if audio_out and len(audio) > 0:
     sf.write(audio_out, audio, SAMPLE_RATE)
 
 print("BENCH_RESULT:" + json.dumps({
+    "requested": {
+        "quantization": requested_quantization,
+        "semantic_backend": args["sem_mode"],
+        "voice_reference": requested_voice,
+    },
+    "effective": {
+        "quantization": effective_quantization,
+        "semantic_backend": sem_mode if semantic_fn is not None else "none",
+        "voice_reference": effective_voice,
+    },
     "gen_s": gen_s,
     "audio_s": audio_s,
     "rtf": rtf,
@@ -141,7 +166,7 @@ def run_config(
     cfg: dict[str, int | bool],
     args: argparse.Namespace,
     audio_dir: str | Path | None = None,
-) -> dict[str, float] | None:
+) -> dict[str, object] | None:
     audio_out = None
     if audio_dir:
         safe = label.replace(", ", "_").replace(" ", "_")
@@ -163,19 +188,21 @@ def run_config(
         result = subprocess.run(
             [sys.executable, "-c", make_script(), json.dumps(payload)],
             capture_output=True,
+            check=False,
             text=True,
             timeout=600,
         )
-        for line in result.stdout.split("\n"):
-            if line.startswith("BENCH_RESULT:"):
-                return json.loads(line[len("BENCH_RESULT:") :])
-        print(f"FAILED")
+        if result.returncode == 0:
+            for line in result.stdout.split("\n"):
+                if line.startswith("BENCH_RESULT:"):
+                    return json.loads(line[len("BENCH_RESULT:") :])
+        print("FAILED")
         stderr = (result.stdout + result.stderr)[-500:]
         if stderr.strip():
             for l in stderr.strip().split("\n")[-3:]:
                 print(f"    {l}")
     except subprocess.TimeoutExpired:
-        print(f"TIMEOUT")
+        print("TIMEOUT")
     return None
 
 
@@ -213,28 +240,40 @@ print("DONE")
             ),
         ],
         capture_output=True,
+        check=False,
         text=True,
         timeout=300,
     )
-    if "DONE" in result.stdout:
+    if result.returncode == 0 and "DONE" in result.stdout.splitlines():
         return save_path
-    print(f"Voice encoding failed:")
+    print("Voice encoding failed:")
     print((result.stdout + result.stderr)[-500:])
     return None
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Benchmark VibeVoice MLX configurations")
-    parser.add_argument("--model", default="gafiatulin/vibevoice-1.5b-mlx", help="Model ID")
-    parser.add_argument("--ref-audio", default=None, help="Reference audio for voice cloning")
+    parser = argparse.ArgumentParser(
+        description="Benchmark VibeVoice MLX configurations"
+    )
+    parser.add_argument(
+        "--model", default="gafiatulin/vibevoice-1.5b-mlx", help="Model ID"
+    )
+    parser.add_argument(
+        "--ref-audio", default=None, help="Reference audio for voice cloning"
+    )
     parser.add_argument("--text", default=DEFAULT_TEXT, help="Text to synthesize")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--max-tokens", type=int, default=400, help="Max speech tokens (~30s)")
-    parser.add_argument("--save-audio", default=None, help="Directory to save audio files")
+    parser.add_argument(
+        "--max-tokens", type=int, default=400, help="Max speech tokens (~30s)"
+    )
+    parser.add_argument(
+        "--save-audio", default=None, help="Directory to save audio files"
+    )
     args = parser.parse_args()
 
     # Pre-download model in parent process
     from vibevoice_mlx.load_weights import resolve_model_path
+
     resolved = str(resolve_model_path(args.model))
     args.model = resolved
 
@@ -261,7 +300,9 @@ def main():
             args.voice_arg = voice_path
             print(f"Voice saved to {voice_path}")
         else:
-            print("WARNING: Voice encoding failed, running without voice cloning")
+            parser.exit(
+                1, "Cannot benchmark the requested voice reference: encoding failed.\n"
+            )
 
     print()
     header = f"{'Config':<30} {'RTF':>6} {'Gen':>8} {'Audio':>7} {'Mem':>8}"
@@ -274,17 +315,21 @@ def main():
         r = run_config(label, cfg, args, audio_dir=audio_dir)
         if r:
             all_results.append((label, r))
-            print(f"{r['rtf']:>5.2f}x {r['gen_s']*1000:>7.0f}ms {r['audio_s']:>6.1f}s {r['peak_mem_gb']:>6.1f} GB")
+            print(
+                f"{r['rtf']:>5.2f}x {r['gen_s'] * 1000:>7.0f}ms {r['audio_s']:>6.1f}s {r['peak_mem_gb']:>6.1f} GB"
+            )
         else:
             pass  # error already printed
 
     # Summary table
-    print(f"\n{'='*62}")
+    print(f"\n{'=' * 62}")
     print(f"{'Config':<30} {'RTF':>6} {'Gen':>8} {'Audio':>7} {'Mem':>8}")
-    print(f"{'-'*30} {'-'*6} {'-'*8} {'-'*7} {'-'*8}")
+    print(f"{'-' * 30} {'-' * 6} {'-' * 8} {'-' * 7} {'-' * 8}")
     for label, r in all_results:
-        print(f"{label:<30} {r['rtf']:>5.2f}x {r['gen_s']*1000:>7.0f}ms {r['audio_s']:>6.1f}s {r['peak_mem_gb']:>6.1f} GB")
-    print(f"{'='*62}")
+        print(
+            f"{label:<30} {r['rtf']:>5.2f}x {r['gen_s'] * 1000:>7.0f}ms {r['audio_s']:>6.1f}s {r['peak_mem_gb']:>6.1f} GB"
+        )
+    print(f"{'=' * 62}")
 
     if args.save_audio:
         results_file = Path(args.save_audio) / tag / "results.json"

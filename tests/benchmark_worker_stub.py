@@ -1,6 +1,7 @@
 """CPU-only stand-ins installed by sitecustomize in benchmark worker tests."""
 
 import json
+import os
 import sys
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -44,7 +45,8 @@ class VoiceCloneData:
 
 def load_model(model: str, quantize_bits: int | None = None) -> tuple[object, object]:
     event("load_model", model=model, quantize_bits=quantize_bits)
-    return object(), object()
+    bits = os.environ.get("BENCH_TEST_SOURCE_BITS")
+    return object(), SimpleNamespace(quantization={"bits": int(bits)} if bits else None)
 
 
 def load_audio(path: str) -> list[int]:
@@ -56,6 +58,8 @@ def encode_voice(
     audio: list[int], tokens: int, model: object, config: object, model_id: str
 ) -> Array:
     event("encode_voice", audio_samples=len(audio), tokens=tokens, model=model_id)
+    if os.environ.get("BENCH_TEST_VOICE_FAILURE"):
+        raise ValueError("Voice encoding failed")
     return Array()
 
 
@@ -77,16 +81,25 @@ def tokenize_text(
     text: str, tokenizer: str, config: object, ref_audio: list[str] | None = None
 ) -> VoiceCloneData | list[int]:
     event("tokenize", text=text, tokenizer=tokenizer, ref_audio=ref_audio)
+    if os.environ.get("BENCH_TEST_MISSING_VOICE"):
+        return [1, 2]
     return VoiceCloneData() if ref_audio else [1, 2]
 
 
-def semantic(model: object, config: object, model_id: str) -> tuple[object, object]:
+def semantic(
+    model: object, config: object, model_id: str
+) -> tuple[object, object] | None:
     event("semantic", model=model_id)
+    if os.environ.get("BENCH_TEST_MISSING_MLX"):
+        return None
     return object(), object()
 
 
-def coreml(model: object, config: object) -> None:
+def coreml(model: object, config: object) -> tuple[object, object] | None:
     event("coreml_fallback")
+    if os.environ.get("BENCH_TEST_COREML_AVAILABLE"):
+        return object(), object()
+    return None
 
 
 def generate(**kwargs: Any) -> tuple[list[float], SimpleNamespace]:
@@ -115,6 +128,7 @@ core.get_peak_memory = lambda: 1_000_000_000
 module("vibevoice_mlx")
 weights = module("vibevoice_mlx.load_weights")
 weights.load_model = load_model
+weights.resolve_model_path = lambda path: path
 pipeline = module("vibevoice_mlx.e2e_pipeline")
 pipeline._load_and_resample = load_audio
 pipeline.encode_voice_reference = encode_voice
