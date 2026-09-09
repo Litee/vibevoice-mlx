@@ -30,8 +30,7 @@ from .generate import (
     GenerationOptions,
     GenerationStopReason,
     MLXSemanticCallback,
-    _validate_cfg_scale,
-    _validate_diffusion_steps,
+    _validate_generation_options,
     generate,
 )
 from .load_weights import load_model, resolve_model_path
@@ -569,9 +568,20 @@ def main():
     parser.add_argument("--tokenizer", type=str, default=None,
                         help="Tokenizer name (auto-detected if not specified)")
     args = parser.parse_args()
+    opts = GenerationOptions(
+        solver=args.solver,
+        diffusion_steps=args.diffusion_steps,
+        cfg_scale=args.cfg_scale,
+        max_speech_tokens=args.max_speech_tokens,
+        silence_detection=args.silence_detection,
+        trim_trailing_silence=args.trim_trailing_silence,
+        silence_threshold=args.silence_threshold,
+        silence_min_duration_ms=args.silence_min_duration_ms,
+        silence_pad_ms=args.silence_pad_ms,
+        seed=args.seed,
+    )
     try:
-        _validate_cfg_scale(args.cfg_scale)
-        _validate_diffusion_steps(args.diffusion_steps)
+        _validate_generation_options(opts)
     except ValueError as error:
         parser.error(str(error))
 
@@ -674,19 +684,6 @@ def main():
             print("Semantic encoder: disabled (not available)")
 
     # Generate
-    opts = GenerationOptions(
-        solver=args.solver,
-        diffusion_steps=args.diffusion_steps,
-        cfg_scale=args.cfg_scale,
-        max_speech_tokens=args.max_speech_tokens,
-        silence_detection=args.silence_detection,
-        trim_trailing_silence=args.trim_trailing_silence,
-        silence_threshold=args.silence_threshold,
-        silence_min_duration_ms=args.silence_min_duration_ms,
-        silence_pad_ms=args.silence_pad_ms,
-        seed=args.seed,
-    )
-
     print("Generating...")
     mx.reset_peak_memory()
     t0 = time.perf_counter()

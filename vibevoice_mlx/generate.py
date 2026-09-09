@@ -55,7 +55,7 @@ class GenerationOptions:
     silence_threshold: float = 0.05  # RMS threshold for silence detection
     silence_min_duration_ms: int = 1500  # Forward scan: min silence gap to cut
     silence_pad_ms: int = 300      # Padding after detected speech end
-    seed: int = 42
+    seed: int | None = 42
 
 
 GenerationStopReason = Literal[
@@ -135,6 +135,50 @@ def _validate_diffusion_steps(num_steps: int) -> int:
             f"received {num_steps!r}."
         )
     return int(num_steps)
+
+
+def _validate_generation_options(opts: GenerationOptions) -> None:
+    """Validate at both entry points, including options mutated after creation."""
+    _validate_cfg_scale(opts.cfg_scale)
+    _validate_diffusion_steps(opts.diffusion_steps)
+    if (
+        not isinstance(opts.max_speech_tokens, (int, np.integer))
+        or isinstance(opts.max_speech_tokens, bool)
+        or opts.max_speech_tokens <= 0
+    ):
+        raise ValueError("max_speech_tokens must be a positive integer.")
+
+    # RandomState accepts Python bools and None; preserve those existing modes.
+    if opts.seed is not None and (
+        not isinstance(opts.seed, (int, np.integer)) or not 0 <= opts.seed < 2**32
+    ):
+        raise ValueError("seed must be an integer between 0 and 4294967295, or None.")
+
+    do_trim = (
+        opts.trim_trailing_silence
+        if opts.trim_trailing_silence is not None
+        else opts.silence_detection
+    )
+    if not do_trim:
+        return
+    # These settings affect waveform trimming, not latent silence detection.
+    for name, positive in (
+        ("silence_threshold", False),
+        ("silence_min_duration_ms", True),
+        ("silence_pad_ms", False),
+    ):
+        value = getattr(opts, name)
+        try:
+            valid = (
+                isinstance(value, (int, float, np.integer, np.floating, np.bool_))
+                and np.isfinite(value)
+                and (value > 0 if positive else value >= 0)
+            )
+        except TypeError:
+            valid = False
+        if not valid:
+            bound = "positive" if positive else "nonnegative"
+            raise ValueError(f"{name} must be a finite {bound} real number.")
 
 
 def _prepare_diffusion_conditioning(
@@ -416,8 +460,9 @@ def generate(
     solver_fn = {"dpm": dpm_solver_2m, "sde": dpm_solver_sde_2m}.get(opts.solver)
     if solver_fn is None:
         raise ValueError(f"Unsupported solver {opts.solver!r}; choose 'dpm' or 'sde'.")
-    _validate_cfg_scale(opts.cfg_scale)
-    diffusion_steps = _validate_diffusion_steps(opts.diffusion_steps)
+    _validate_generation_options(opts)
+    diffusion_steps = int(opts.diffusion_steps)
+    max_speech_tokens = int(opts.max_speech_tokens)
 
     config = model.config
     dtype = mx.float16
@@ -534,14 +579,14 @@ def generate(
         unit="tok",
     )
 
-    for step in range(opts.max_speech_tokens * 3):
+    for step in range(max_speech_tokens * 3):
         if next_token == config.eos_id:
             metrics.stop_reason = "eos"
             break
         if config.single_segment and next_token == config.speech_end_id:
             metrics.stop_reason = "speech_end"
             break
-        if metrics.num_speech_tokens >= opts.max_speech_tokens:
+        if metrics.num_speech_tokens >= max_speech_tokens:
             metrics.stop_reason = "max_speech_tokens"
             break
 
@@ -634,8 +679,8 @@ def generate(
         if (
             use_evolving_cfg
             and next_token == config.speech_diffusion_id
-            and metrics.num_speech_tokens < opts.max_speech_tokens
-            and step + 1 < opts.max_speech_tokens * 3
+            and metrics.num_speech_tokens < max_speech_tokens
+            and step + 1 < max_speech_tokens * 3
         ):
             neg_pos = mx.array([float(neg_position)], dtype=mx.float32)
             neg_cos, neg_sin = compute_rope(neg_pos, config.head_dim, config.rope_theta)
