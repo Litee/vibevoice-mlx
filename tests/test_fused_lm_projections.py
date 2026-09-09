@@ -1,10 +1,12 @@
 """Projection packing preserves the LM output, token and cache interfaces."""
 
 import mlx.core as mx
+import numpy as np
 import pytest
 from mlx import nn
 from mlx.utils import tree_flatten, tree_map
 
+from vibevoice_mlx import fast_forward
 from vibevoice_mlx.fast_forward import FastLM
 from vibevoice_mlx.model import KVCache, VibeVoiceConfig, VibeVoiceModel, compute_rope
 
@@ -48,24 +50,49 @@ def assert_same(actual: mx.array, expected: mx.array) -> None:
     "fuse_qkv,fuse_gate_up", [(True, False), (False, True), (True, True)]
 )
 def test_fusion_preserves_prefill_decode_tokens_and_caches(
-    bits: int | None, fuse_qkv: bool, fuse_gate_up: bool
+    bits: int | None,
+    fuse_qkv: bool,
+    fuse_gate_up: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     model = make_model(bits)
     reference = make_model(bits)
     reference.load_weights(tree_flatten(model.parameters()))
     lm = FastLM(model, model.config, fuse_qkv=fuse_qkv, fuse_gate_up=fuse_gate_up)
     caches = [KVCache(2, growth_step=4), KVCache(2, growth_step=4)]
+    calls: list[dict] = []
+    original_mm = fast_forward._mm
+
+    def record_mm(x: mx.array, weights: dict) -> mx.array:
+        calls.append(weights)
+        return original_mm(x, weights)
+
+    monkeypatch.setattr(fast_forward, "_mm", record_mm)
 
     for position, count in [(0, 3), (3, 1), (4, 1)]:
         h = mx.random.normal((1, count, 64)).astype(mx.float16)
         cos, sin = compute_rope(mx.arange(position, position + count), 16, 1_000_000)
         mask = mx.triu(mx.full((count, count), -mx.inf, dtype=mx.float16), k=1)
         expected = reference.model(h, cos, sin, mask if count > 1 else None, caches[0])
+        calls.clear()
         actual = (
             lm.prefill(h, cos, sin, mask, caches[1])
             if count > 1
             else lm.forward(h, cos, sin, caches[1])
         )
+        # Output parity alone also passes if fusion silently stops activating.
+        for layer in lm.layers:
+            for key, names, enabled in (
+                ("qkv", ("q", "k", "v"), fuse_qkv),
+                ("gu", ("g", "u"), fuse_gate_up),
+            ):
+                assert (layer[key] is not None) == enabled
+                if enabled:
+                    assert sum(weights is layer[key] for weights in calls) == 1
+                for name in names:
+                    assert sum(weights is layer[name] for weights in calls) == (
+                        0 if enabled else 1
+                    )
         assert_same(actual, expected)
         assert lm.select_token(actual[:, -1:]) == lm.select_token(expected[:, -1:])
         assert lm.select_token(actual[:, -1:], speech_only=True) == lm.select_token(
@@ -75,6 +102,53 @@ def test_fusion_preserves_prefill_decode_tokens_and_caches(
             assert_same(result, source)
         for source, result in zip(caches[0].values, caches[1].values, strict=True):
             assert_same(result, source)
+
+
+@pytest.mark.parametrize("bits", [None, 4, 8], ids=["fp16", "int4", "int8"])
+@pytest.mark.parametrize(
+    "fuse_qkv,fuse_gate_up", [(True, False), (False, True), (True, True)]
+)
+def test_fused_parameters_share_backing_storage(
+    bits: int | None, fuse_qkv: bool, fuse_gate_up: bool
+) -> None:
+    model = make_model(bits)
+    lm = FastLM(model, model.config, fuse_qkv=fuse_qkv, fuse_gate_up=fuse_gate_up)
+    fields = {"w": "weight"}
+    if bits is not None:
+        fields.update(s="scales", b="biases")
+
+    for module, layer in zip(model.model.layers, lm.layers, strict=True):
+        attention, mlp = module.self_attn, module.mlp
+        for key, projections in (
+            (
+                "qkv",
+                (
+                    ("q", attention.q_proj),
+                    ("k", attention.k_proj),
+                    ("v", attention.v_proj),
+                ),
+            ),
+            ("gu", (("g", mlp.gate_proj), ("u", mlp.up_proj))),
+        ):
+            if layer[key] is None:
+                continue
+            offset = 0
+            for name, projection in projections:
+                size = projection.weight.shape[0]
+                for field, attribute in fields.items():
+                    parameter = getattr(projection, attribute)
+                    assert layer[name][field] is parameter
+                    # NumPy exposes the evaluated MLX buffer without copying.
+                    # Compare storage directly, avoiding allocator noise from
+                    # other arrays or processes in a memory-counter assertion.
+                    backing = np.asarray(layer[key][field])
+                    actual = np.asarray(parameter)
+                    expected = backing[offset : offset + size]
+                    assert np.shares_memory(actual, backing)
+                    assert actual.shape == expected.shape
+                    assert actual.strides == expected.strides
+                    assert actual.ctypes.data == expected.ctypes.data
+                offset += size
 
 
 @pytest.mark.parametrize("bits", [None, 4, 8], ids=["fp16", "int4", "int8"])
