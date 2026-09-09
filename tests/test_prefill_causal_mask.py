@@ -9,7 +9,6 @@ from mlx import nn
 from mlx.utils import tree_map
 from test_semantic_audio_context import tiny_decoder
 
-from vibevoice_mlx import fast_forward
 from vibevoice_mlx.fast_forward import FastLM
 from vibevoice_mlx.generate import GenerationOptions, generate
 from vibevoice_mlx.model import (
@@ -127,63 +126,15 @@ def test_native_prefill_preserves_hidden_cache_and_following_tokens(
         record_property("max_absolute_difference", max_difference)
 
 
-@pytest.mark.parametrize("mlx_version", ["0.22.0", "0.23.2"])
-def test_native_prefill_falls_back_for_legacy_mlx(
-    monkeypatch: pytest.MonkeyPatch,
-    mlx_version: str,
-) -> None:
-    with mx.stream(mx.cpu):
-        monkeypatch.setattr(fast_forward, "version", lambda _: mlx_version)
-        model = make_model(mx.float16)
-        lm = FastLM(model, model.config)
-        prompt = model.model.embed_tokens(mx.array([[4, 5, 6]]))
-        cos, sin = compute_rope(mx.arange(3), 128, model.config.rope_theta)
-        expected = lm.prefill(
-            prompt, cos, sin, additive_mask(3, mx.float16), KVCache(2)
-        )
-        attention = mx.fast.scaled_dot_product_attention
-        masks = []
-
-        def legacy_attention(
-            q: mx.array,
-            k: mx.array,
-            v: mx.array,
-            *,
-            scale: float,
-            mask: mx.array | str,
-        ) -> mx.array:
-            assert isinstance(mask, mx.array)
-            masks.append(mask)
-            return attention(q, k, v, scale=scale, mask=mask)
-
-        monkeypatch.setattr(mx.fast, "scaled_dot_product_attention", legacy_attention)
-        actual = lm.prefill(prompt, cos, sin, "causal", KVCache(2))
-        assert mx.array_equal(actual, expected).item()
-        assert len(masks) == 2
-        assert masks[0] is masks[1]
-
-
-@pytest.mark.parametrize(
-    ("mlx_version", "native"),
-    [
-        ("0.24.0", True),
-        ("0.31.1", True),
-        ("0.22.0", False),
-        ("0.23.2", False),
-        ("0.24.0", False),
-        ("0.31.1", False),
-    ],
-)
+@pytest.mark.parametrize("native", [True, False])
 def test_prefill_propagates_unrelated_attention_type_errors(
-    monkeypatch: pytest.MonkeyPatch, mlx_version: str, native: bool
+    monkeypatch: pytest.MonkeyPatch, native: bool
 ) -> None:
     with mx.stream(mx.cpu):
-        monkeypatch.setattr(fast_forward, "version", lambda _: mlx_version)
         model = make_model(mx.float16)
         lm = FastLM(model, model.config)
         prompt = model.model.embed_tokens(mx.array([[4, 5, 6]]))
         cos, sin = compute_rope(mx.arange(3), 128, model.config.rope_theta)
-        attention = mx.fast.scaled_dot_product_attention
         failure = TypeError("Unrelated attention implementation failure")
         masks = []
 
@@ -196,9 +147,6 @@ def test_prefill_propagates_unrelated_attention_type_errors(
             mask: mx.array | str,
         ) -> mx.array:
             masks.append(mask)
-            if native and isinstance(mask, mx.array):
-                # A broad TypeError handler would silently recover here.
-                return attention(q, k, v, scale=scale, mask=mask)
             raise failure
 
         monkeypatch.setattr(mx.fast, "scaled_dot_product_attention", failing_attention)
