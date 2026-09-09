@@ -52,10 +52,82 @@ def _mm(x, d):
     return x @ d["w"].T
 
 
-class FastLM:
-    """Flat-dict LM for fast autoregressive decode."""
+def _fuse_linear(modules: tuple[nn.Module, ...]) -> dict | None:
+    """Pack compatible output rows and give the modules views of that storage.
 
-    def __init__(self, model: VibeVoiceModel, config: VibeVoiceConfig):
+    Materialize one group at a time so packing does not retain a second full
+    model. Original parameter names, shapes and quantization metadata survive.
+    """
+    parts = [_extract_linear(module) for module in modules]
+    first = parts[0]
+    if any(part["q"] != first["q"] for part in parts):
+        return None
+    fields = {"w": "weight"}
+    if first["q"]:
+        if any(
+            part["gs"] != first["gs"] or part["bits"] != first["bits"] for part in parts
+        ) or any(getattr(module, "mode", "affine") != "affine" for module in modules):
+            return None
+        fields.update(s="scales", b="biases")
+    if any(
+        part[key].dtype != first[key].dtype
+        or part[key].shape[1:] != first[key].shape[1:]
+        for part in parts
+        for key in fields
+    ):
+        return None
+    fused = {key: first[key] for key in ("q", "gs", "bits") if key in first}
+    for key in fields:
+        fused[key] = mx.concatenate([part[key] for part in parts], axis=0)
+    mx.eval(*(fused[key] for key in fields))
+    offset = 0
+    for module, part in zip(modules, parts, strict=True):
+        size = part["w"].shape[0]
+        for key, attribute in fields.items():
+            view = fused[key][offset : offset + size]
+            mx.eval(view)
+            setattr(module, attribute, view)
+        offset += size
+    return fused
+
+
+def _projections(
+    x: mx.array, layer: dict, names: tuple[str, ...], fused_key: str
+) -> tuple[mx.array, ...]:
+    fused = layer.get(fused_key)
+    if fused is None:
+        outputs = [_mm(x, layer[name]) for name in names]
+    else:
+        projected = _mm(x, fused)
+        outputs = []
+        offset = 0
+        for name in names:
+            size = layer[name]["w"].shape[0]
+            outputs.append(projected[..., offset : offset + size])
+            offset += size
+    # Keep each bias addition separate to preserve its dtype and rounding.
+    return tuple(
+        output + layer[name]["bias"] if "bias" in layer[name] else output
+        for name, output in zip(names, outputs, strict=True)
+    )
+
+
+class FastLM:
+    """Flat-dict LM for fast autoregressive decode.
+
+    Fusion switches are independent; incompatible projection groups stay
+    separate. Packing replaces model arrays with shared row views. Rebuild the
+    fast path after reloading or otherwise replacing model parameters.
+    """
+
+    def __init__(
+        self,
+        model: VibeVoiceModel,
+        config: VibeVoiceConfig,
+        *,
+        fuse_qkv: bool = True,
+        fuse_gate_up: bool = True,
+    ) -> None:
         self.H = config.hidden_size
         self.NH = config.num_attention_heads
         self.NKV = config.num_key_value_heads
@@ -69,6 +141,8 @@ class FastLM:
         self.layers = []
         for layer in model.model.layers:
             sa, ml = layer.self_attn, layer.mlp
+            qkv = _fuse_linear((sa.q_proj, sa.k_proj, sa.v_proj)) if fuse_qkv else None
+            gate_up = _fuse_linear((ml.gate_proj, ml.up_proj)) if fuse_gate_up else None
             d = {
                 "iln": layer.input_layernorm.weight,
                 "pln": layer.post_attention_layernorm.weight,
@@ -79,6 +153,8 @@ class FastLM:
                 "g": _extract_linear(ml.gate_proj),
                 "u": _extract_linear(ml.up_proj),
                 "d": _extract_linear(ml.down_proj),
+                "qkv": qkv,
+                "gu": gate_up,
             }
             self.layers.append(d)
 
@@ -141,15 +217,7 @@ class FastLM:
 
             hn_cat = mx.fast.rms_norm(h_cat, d["iln"], eps)
 
-            q_cat = _mm(hn_cat, d["q"])
-            if "bias" in d["q"]:
-                q_cat = q_cat + d["q"]["bias"]
-            k_cat = _mm(hn_cat, d["k"])
-            if "bias" in d["k"]:
-                k_cat = k_cat + d["k"]["bias"]
-            v_cat = _mm(hn_cat, d["v"])
-            if "bias" in d["v"]:
-                v_cat = v_cat + d["v"]["bias"]
+            q_cat, k_cat, v_cat = _projections(hn_cat, d, ("q", "k", "v"), "qkv")
 
             # Split for attention (different KV caches)
             q_m, q_n = q_cat[0:1], q_cat[1:2]
@@ -184,7 +252,8 @@ class FastLM:
 
             res_cat = h_cat
             hn_cat = mx.fast.rms_norm(h_cat, d["pln"], eps)
-            h_cat = res_cat + _mm(nn.silu(_mm(hn_cat, d["g"])) * _mm(hn_cat, d["u"]), d["d"])
+            gate, up = _projections(hn_cat, d, ("g", "u"), "gu")
+            h_cat = res_cat + _mm(nn.silu(gate) * up, d["d"])
 
             hm, hn_input = h_cat[0:1], h_cat[1:2]
 
@@ -203,15 +272,7 @@ class FastLM:
             res = h
             hn = mx.fast.rms_norm(h, d["iln"], eps)
 
-            q = _mm(hn, d["q"])
-            if "bias" in d["q"]:
-                q = q + d["q"]["bias"]
-            k = _mm(hn, d["k"])
-            if "bias" in d["k"]:
-                k = k + d["k"]["bias"]
-            v = _mm(hn, d["v"])
-            if "bias" in d["v"]:
-                v = v + d["v"]["bias"]
+            q, k, v = _projections(hn, d, ("q", "k", "v"), "qkv")
 
             q = q.reshape(1, -1, NH, HD).transpose(0, 2, 1, 3)
             k = k.reshape(1, -1, NKV, HD).transpose(0, 2, 1, 3)
@@ -230,7 +291,8 @@ class FastLM:
 
             res = h
             hn = mx.fast.rms_norm(h, d["pln"], eps)
-            h = res + _mm(nn.silu(_mm(hn, d["g"])) * _mm(hn, d["u"]), d["d"])
+            gate, up = _projections(hn, d, ("g", "u"), "gu")
+            h = res + _mm(nn.silu(gate) * up, d["d"])
 
         return mx.fast.rms_norm(h, self.norm_w, eps)
 
@@ -279,15 +341,7 @@ class FastLM:
             res = h
             hn = mx.fast.rms_norm(h, d["iln"], eps)
 
-            q = _mm(hn, d["q"])
-            if "bias" in d["q"]:
-                q = q + d["q"]["bias"]
-            k = _mm(hn, d["k"])
-            if "bias" in d["k"]:
-                k = k + d["k"]["bias"]
-            v = _mm(hn, d["v"])
-            if "bias" in d["v"]:
-                v = v + d["v"]["bias"]
+            q, k, v = _projections(hn, d, ("q", "k", "v"), "qkv")
 
             q = q.reshape(1, -1, NH, HD).transpose(0, 2, 1, 3)
             k = k.reshape(1, -1, NKV, HD).transpose(0, 2, 1, 3)
@@ -306,7 +360,8 @@ class FastLM:
 
             res = h
             hn = mx.fast.rms_norm(h, d["pln"], eps)
-            h = res + _mm(nn.silu(_mm(hn, d["g"])) * _mm(hn, d["u"]), d["d"])
+            gate, up = _projections(hn, d, ("g", "u"), "gu")
+            h = res + _mm(nn.silu(gate) * up, d["d"])
 
         return mx.fast.rms_norm(h, self.norm_w, eps)
 
