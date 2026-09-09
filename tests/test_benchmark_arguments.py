@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import os
+import runpy
 import shutil
 import subprocess
 import sys
@@ -11,6 +12,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import test_bundled_tokenizer
+
+tiny_checkpoint = test_bundled_tokenizer.tiny_checkpoint
 
 spec = importlib.util.spec_from_file_location(
     "bench_compare", Path(__file__).resolve().parents[1] / "bench_compare.py"
@@ -28,6 +32,61 @@ USER_STRINGS = [
         id="python-expression",
     ),
 ]
+
+
+def test_worker_runs_with_real_bundle_tokenizer(
+    tiny_checkpoint: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import httpx
+    import numpy as np
+
+    from vibevoice_mlx.generate import GenerationMetrics
+
+    generation = importlib.import_module("vibevoice_mlx.generate")
+    test_bundled_tokenizer.tokenizer_with_hello(5).save_pretrained(tiny_checkpoint)
+    prompts: list[list[int]] = []
+
+    def generate(
+        *, input_ids: list[int], **kwargs: Any
+    ) -> tuple[np.ndarray, GenerationMetrics]:
+        prompts.append(input_ids)
+        return np.zeros(1, dtype=np.float32), GenerationMetrics(num_speech_tokens=1)
+
+    def reject_network(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("The worker must use the resolved local tokenizer")
+
+    monkeypatch.setattr(generation, "generate", generate)
+    monkeypatch.setattr(httpx.Client, "send", reject_network)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "worker",
+            json.dumps(
+                {
+                    "model": str(tiny_checkpoint),
+                    "quantize": None,
+                    "sem_mode": "none",
+                    "voice_arg": None,
+                    "text": "Hello",
+                    "max_tokens": 1,
+                    "seed": 0,
+                    "audio_out": None,
+                }
+            ),
+        ],
+    )
+
+    worker = tmp_path / "worker.py"
+    worker.write_text(benchmark.make_script())
+    runpy.run_path(str(worker), run_name="__main__")
+
+    assert len(prompts) == 1
+    assert 5 in prompts[0]
+    assert "BENCH_RESULT:" in capsys.readouterr().out
 
 
 @pytest.fixture
