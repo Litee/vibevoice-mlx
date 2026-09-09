@@ -28,6 +28,7 @@ from .fast_forward import FastLM, FastDiffusionHead, PreparedDiffusionConditioni
 DDPM_STEPS = 1000
 VAE_DIM = 64
 _FINAL_VAE_CHUNK_TOKENS = 32
+_LM_PREFILL_CHUNK_TOKENS = 512
 
 _AC64 = np.cos((np.arange(DDPM_STEPS + 1, dtype=np.float64) / DDPM_STEPS + 0.008) / 1.008 * np.pi / 2) ** 2
 # Discretize cosine intervals before taking the cumulative product. The beta
@@ -456,28 +457,45 @@ def generate(
         neg_cache = None
         neg_position = 0
 
-    # Prefill (use fast_lm.prefill for batched tokens)
+    # Bound prompt activations while retaining the complete KV history.
     t0 = time.perf_counter()
     n_prefill = len(input_ids)
-
-    if voice_embeds:
-        embeds_list = []
-        for pos, tok_id in enumerate(input_ids):
-            if pos in voice_embeds:
-                embeds_list.append(voice_embeds[pos].reshape(1, config.hidden_size))
-            else:
-                embeds_list.append(embed_table[tok_id].reshape(1, config.hidden_size))
-        prefill_embeds = mx.stack(embeds_list, axis=0).reshape(1, n_prefill, config.hidden_size)
-    else:
-        ids_mx = mx.array(input_ids)
-        prefill_embeds = embed_table[ids_mx].reshape(1, n_prefill, config.hidden_size)
-
-    positions = mx.arange(n_prefill, dtype=mx.float32)
-    cos_prefill, sin_prefill = compute_rope(positions, config.head_dim, config.rope_theta)
     cache = KVCache(NL)
-    hidden = fast_lm.prefill(prefill_embeds, cos_prefill, sin_prefill, "causal", cache)
-    mx.eval(hidden, *cache.keys, *cache.values)
-    hidden = hidden[:, -1:, :]
+    for start in range(0, n_prefill, _LM_PREFILL_CHUNK_TOKENS):
+        end = min(start + _LM_PREFILL_CHUNK_TOKENS, n_prefill)
+        if voice_embeds:
+            embeds_list = []
+            for pos in range(start, end):
+                if pos in voice_embeds:
+                    embeds_list.append(voice_embeds[pos].reshape(1, config.hidden_size))
+                else:
+                    embeds_list.append(
+                        embed_table[input_ids[pos]].reshape(1, config.hidden_size)
+                    )
+            prefill_embeds = mx.stack(embeds_list, axis=0).reshape(
+                1, end - start, config.hidden_size
+            )
+        else:
+            ids_mx = mx.array(input_ids[start:end])
+            prefill_embeds = embed_table[ids_mx].reshape(
+                1, end - start, config.hidden_size
+            )
+
+        positions = mx.arange(start, end, dtype=mx.float32)
+        cos_prefill, sin_prefill = compute_rope(
+            positions, config.head_dim, config.rope_theta
+        )
+        if n_prefill <= _LM_PREFILL_CHUNK_TOKENS:
+            hidden = fast_lm.prefill(
+                prefill_embeds, cos_prefill, sin_prefill, "causal", cache
+            )
+        else:
+            hidden = fast_lm.prefill_chunk(
+                prefill_embeds, cos_prefill, sin_prefill, cache
+            )
+        # Materialize before the next chunk so its graph cannot retain activations.
+        mx.eval(hidden, *cache.keys, *cache.values)
+        hidden = hidden[:, -1:, :]
 
     metrics.record("prefill", (time.perf_counter() - t0) * 1000)
     metrics.num_text_tokens = n_prefill

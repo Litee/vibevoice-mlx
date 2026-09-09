@@ -265,15 +265,44 @@ class FastLM:
         return self.speech_token_ids[index] if speech_only else index
 
     def prefill(
-        self, embeds: mx.array, cos: mx.array, sin: mx.array,
-        mask: mx.array | str, cache: KVCache,
+        self,
+        embeds: mx.array,
+        cos: mx.array,
+        sin: mx.array,
+        mask: mx.array | str,
+        cache: KVCache,
     ) -> mx.array:
-        """Batched prefill (Q>1) with causal mask. Same as forward but with mask."""
+        """Start a new prompt, resetting any previously cached tokens."""
+        cache.reset()
+        return self._prefill_inner(embeds, cos, sin, mask, cache)
+
+    def prefill_chunk(
+        self,
+        embeds: mx.array,
+        cos: mx.array,
+        sin: mx.array,
+        cache: KVCache,
+    ) -> mx.array:
+        """Append a causal prompt chunk while retaining all previous KV history.
+
+        cos and sin must describe this chunk's absolute positions, as in forward.
+        Callers start with an empty cache and evaluate each chunk before proceeding.
+        Native causal attention aligns the final query with the final cached key.
+        """
+        return self._prefill_inner(embeds, cos, sin, "causal", cache)
+
+    def _prefill_inner(
+        self,
+        embeds: mx.array,
+        cos: mx.array,
+        sin: mx.array,
+        mask: mx.array | str,
+        cache: KVCache,
+    ) -> mx.array:
         NH, NKV, HD, H = self.NH, self.NKV, self.HD, self.H
         scale = self.scale
         eps = self.eps
         h = embeds
-        cache.reset()
 
         for li, d in enumerate(self.layers):
             res = h
@@ -296,11 +325,19 @@ class FastLM:
             q = apply_rope(q, cos, sin)
             k = apply_rope(k, cos, sin)
 
-            cache.update(li, k, v)
+            keys, values = cache.update(li, k, v)
 
-            out = mx.fast.scaled_dot_product_attention(
-                q, k, v, scale=scale, mask=mask,
-            ).transpose(0, 2, 1, 3).reshape(1, -1, H)
+            out = (
+                mx.fast.scaled_dot_product_attention(
+                    q,
+                    keys,
+                    values,
+                    scale=scale,
+                    mask=mask,
+                )
+                .transpose(0, 2, 1, 3)
+                .reshape(1, -1, H)
+            )
 
             h = res + _mm(out, d["o"])
 
