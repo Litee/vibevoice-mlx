@@ -3,6 +3,7 @@
 import json
 import os
 import sys
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
@@ -78,8 +79,9 @@ def load_voice(path: str) -> Array:
     return Array()
 
 
-def detect_tokenizer(model: str, config: object) -> str:
-    event("detect_tokenizer", model=model)
+def detect_tokenizer(model: Path, config: object) -> str:
+    assert isinstance(model, Path)
+    event("detect_tokenizer", model=str(model))
     return "test-tokenizer"
 
 
@@ -149,12 +151,12 @@ module("vibevoice_mlx")
 weights = module("vibevoice_mlx.load_weights")
 weights.load_model = load_model
 weights.resolve_model_path = lambda path: path
+weights.detect_tokenizer = detect_tokenizer
 pipeline = module("vibevoice_mlx.e2e_pipeline")
 pipeline._load_and_resample = load_audio
 pipeline.encode_voice_reference = encode_voice
 pipeline.save_voice = save_voice
 pipeline.load_voice = load_voice
-pipeline._detect_tokenizer = detect_tokenizer
 pipeline.tokenize_text = tokenize_text
 pipeline._try_mlx_semantic = semantic
 pipeline._try_coreml_semantic = coreml

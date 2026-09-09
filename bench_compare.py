@@ -43,12 +43,13 @@ def make_script() -> str:
     """Build fixed worker source; user values arrive as a JSON argument."""
     return textwrap.dedent("""\
 import json, time, os, sys
+from pathlib import Path
 os.environ["TRANSFORMERS_VERBOSITY"] = "error"
 import mlx.core as mx
-from vibevoice_mlx.load_weights import load_model
+from vibevoice_mlx.load_weights import detect_tokenizer, load_model
 from vibevoice_mlx.generate import generate, GenerationOptions
 from vibevoice_mlx.e2e_pipeline import (tokenize_text, VoiceCloneData, SAMPLE_RATE,
-                          _detect_tokenizer, load_voice, encode_voice_reference)
+                          load_voice, encode_voice_reference)
 
 args = json.loads(sys.argv[1])
 model_id = args["model"]
@@ -82,7 +83,7 @@ if sem_mode == "mlx":
     else:
         raise RuntimeError("Requested mlx semantic backend is unavailable")
 
-tokenizer_name = _detect_tokenizer(model_id, config)
+tokenizer_name = detect_tokenizer(Path(model_id), config)
 voice_arg = args["voice_arg"]
 voice_list = [voice_arg] if voice_arg else None
 requested_voice = ("cached" if voice_arg.endswith(".safetensors") else "audio") if voice_arg else "none"
