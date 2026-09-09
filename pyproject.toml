@@ -5,7 +5,7 @@ description = "MLX inference for Microsoft VibeVoice multi-speaker TTS on Apple 
 requires-python = ">=3.10"
 license = "MIT"
 dependencies = [
-    "mlx>=0.22.0",
+    "mlx>=0.24.0",
     "safetensors",
     "scipy",
     "soundfile",

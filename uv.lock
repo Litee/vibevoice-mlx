@@ -1495,7 +1495,7 @@ coreml = [
 requires-dist = [
     { name = "coremltools", marker = "extra == 'coreml'", specifier = ">=9.0" },
     { name = "huggingface-hub" },
-    { name = "mlx", specifier = ">=0.22.0" },
+    { name = "mlx", specifier = ">=0.24.0" },
     { name = "safetensors" },
     { name = "scipy" },
     { name = "soundfile" },
