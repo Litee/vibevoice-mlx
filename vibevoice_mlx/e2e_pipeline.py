@@ -549,13 +549,13 @@ def main():
     parser.add_argument("--silence-detection", action="store_true",
                         help="Boost speech_end logit on sustained silence (for models that don't stop naturally)")
     parser.add_argument("--trim-trailing-silence", action="store_true", default=None,
-                        help="Trim trailing silence from generated audio (default: follows --silence-detection)")
+                        help="Trim only terminal silence, preserving speech after pauses (default: follows --silence-detection)")
     parser.add_argument("--no-trim-trailing-silence", dest="trim_trailing_silence", action="store_false",
                         help="Disable trailing silence trimming even with --silence-detection")
     parser.add_argument("--silence-threshold", type=float, default=0.05,
                         help="RMS threshold for silence detection (default: 0.05)")
     parser.add_argument("--silence-min-duration-ms", type=int, default=1500,
-                        help="Minimum silence duration (ms) before cutting (default: 1500)")
+                        help="Retained for compatibility; trailing-silence trimming ignores this value")
     parser.add_argument("--silence-pad-ms", type=int, default=300,
                         help="Padding (ms) after detected speech end (default: 300)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
