@@ -63,10 +63,15 @@ def generate(
     if opts.max_speech_tokens != 8 and os.environ.get("PODCAST_FAIL"):
         raise RuntimeError("fixture generation failed")
     audio = np.full(selections[:-1].count(3) * 3200, 0.25, dtype=np.float32)
+    audio.fill(float(os.environ.get("PODCAST_AUDIO_VALUE", "0.25")))
     if os.environ.get("PODCAST_NONFINITE_AUDIO"):
         audio[0] = float(os.environ["PODCAST_NONFINITE_AUDIO"])
     return audio, SimpleNamespace(
-        summary=lambda: {"speech_tokens": selections[:-1].count(3)},
+        summary=lambda: {
+            "speech_tokens": selections[:-1].count(3),
+            "stop_reason": os.environ.get("PODCAST_STOP_REASON", "eos"),
+        },
+        stop_reason=os.environ.get("PODCAST_STOP_REASON", "eos"),
         num_speech_tokens=selections[:-1].count(3)
         + int(os.environ.get("PODCAST_METRIC_ERROR", "0")),
     )

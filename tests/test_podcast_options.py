@@ -18,6 +18,121 @@ def reject_nonfinite_json(value: str) -> None:
     raise ValueError(f"Nonstandard JSON number: {value}")
 
 
+@pytest.mark.parametrize(
+    "stop_reason,selections", [("eos", "[3,2,4]"), ("speech_end", "[3,2]")]
+)
+def test_completion_accepts_natural_stop_before_cap(
+    run_podcast: Callable[[list[str]], subprocess.CompletedProcess[str]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stop_reason: str,
+    selections: str,
+) -> None:
+    monkeypatch.setenv("PODCAST_SELECTIONS", selections)
+    monkeypatch.setenv("PODCAST_STOP_REASON", stop_reason)
+    result = run_podcast(["--mode", "completion"])
+
+    assert result.returncode == 0, result.stderr
+    report = json.loads((tmp_path / "audio.json").read_text())
+    assert report["mode"] == "completion"
+    assert report["evaluation"]["status"] == "complete"
+    assert report["evaluation"]["natural_completion"] is True
+    assert report["evaluation"]["natural_fidelity_eligible"] is True
+    assert report["evaluation"]["passed"] is True
+    assert report["metrics"]["stop_reason"] == stop_reason
+    assert report["audio_seconds"] == pytest.approx(0.1333333333)
+
+
+@pytest.mark.parametrize("stop_reason", ["max_speech_tokens", "max_generation_tokens"])
+def test_completion_rejects_limits_even_when_duration_matches(
+    run_podcast: Callable[[list[str]], subprocess.CompletedProcess[str]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stop_reason: str,
+) -> None:
+    monkeypatch.setenv("PODCAST_STOP_REASON", stop_reason)
+    result = run_podcast(["--mode", "completion"])
+
+    assert result.returncode != 0
+    assert f"Incomplete generation: {stop_reason}" in result.stderr
+    report = json.loads((tmp_path / "audio.json").read_text())
+    assert report["evaluation"]["status"] == "incomplete"
+    assert report["evaluation"]["natural_completion"] is False
+    assert report["evaluation"]["passed"] is False
+    assert report["metrics"]["stop_reason"] == stop_reason
+    assert report["audio_seconds"] == pytest.approx(0.2666666667)
+
+
+@pytest.mark.parametrize(
+    "selections,value,error",
+    [
+        ("[4]", "0.25", "Empty audio"),
+        ("[3,2,4]", "nan", "Non-finite audio"),
+    ],
+)
+def test_completion_requires_usable_audio_after_natural_stop(
+    run_podcast: Callable[[list[str]], subprocess.CompletedProcess[str]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    selections: str,
+    value: str,
+    error: str,
+) -> None:
+    monkeypatch.setenv("PODCAST_SELECTIONS", selections)
+    monkeypatch.setenv("PODCAST_AUDIO_VALUE", value)
+    result = run_podcast(["--mode", "completion"])
+
+    assert result.returncode != 0
+    assert error in result.stderr
+    report = json.loads((tmp_path / "audio.json").read_text())
+    assert report["evaluation"]["passed"] is False
+    assert report["evaluation"]["failure"] == error
+    assert report["evaluation"]["natural_fidelity_eligible"] is False
+
+
+@pytest.mark.parametrize("mode", ["completion", "fixed-duration"])
+def test_controlled_replay_is_never_natural_completion_evidence(
+    run_podcast: Callable[[list[str]], subprocess.CompletedProcess[str]],
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    result = run_podcast(
+        ["--mode", mode, "--generation-provenance", "controlled-replay"]
+    )
+
+    report = json.loads((tmp_path / "audio.json").read_text())
+    assert report["generation_provenance"] == "controlled-replay"
+    assert report["evaluation"]["natural_completion"] is False
+    assert report["evaluation"]["natural_fidelity_eligible"] is False
+    if mode == "completion":
+        assert result.returncode != 0
+        assert "Controlled replay cannot establish natural completion" in result.stderr
+    else:
+        assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("mode_args", [[], ["--mode", "fixed-duration"]])
+@pytest.mark.parametrize("selections", ["[3,2,4]", "[3,2,1,3,4]"])
+def test_fixed_duration_requires_budget_without_claiming_fidelity(
+    run_podcast: Callable[[list[str]], subprocess.CompletedProcess[str]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode_args: list[str],
+    selections: str,
+) -> None:
+    monkeypatch.setenv("PODCAST_SELECTIONS", selections)
+    monkeypatch.setenv("PODCAST_STOP_REASON", "max_speech_tokens")
+    result = run_podcast(mode_args)
+
+    reached_duration = selections == "[3,2,1,3,4]"
+    assert (result.returncode == 0) == reached_duration, result.stderr
+    report = json.loads((tmp_path / "audio.json").read_text())
+    assert report["mode"] == "fixed-duration"
+    assert report["evaluation"]["passed"] == reached_duration
+    assert report["evaluation"]["natural_fidelity_eligible"] is False
+    assert report["evaluation"]["natural_completion"] is False
+
+
 @pytest.fixture
 def run_podcast(
     tmp_path: Path,
@@ -132,6 +247,8 @@ def test_options_reach_warmup_generation_and_report(
         (["--tokens", "0"], "--tokens must be a positive integer"),
         (["--tokens", "-1"], "--tokens must be a positive integer"),
         (["--solver", "ddpm"], "invalid choice"),
+        (["--mode", "replay"], "invalid choice"),
+        (["--generation-provenance", "unknown"], "invalid choice"),
         (["--diffusion-steps", "0"], "diffusion steps must"),
         (["--diffusion-steps", "1000"], "diffusion steps must"),
         (["--diffusion-steps", "1.5"], "invalid int"),

@@ -1,4 +1,4 @@
-"""Fixed-duration, two-speaker generation benchmark (run each backend separately)."""
+"""Two-speaker completion or fixed-duration benchmark (run backends separately)."""
 
 import argparse
 import hashlib
@@ -37,6 +37,18 @@ def main() -> None:
     parser.add_argument("--ref-audio", nargs=2, required=True)
     parser.add_argument("--backend", choices=["mlx", "coreml", "ane"], required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--mode",
+        choices=["completion", "fixed-duration"],
+        default="fixed-duration",
+        help="Completion requires a natural stop; fixed-duration requires the token budget.",
+    )
+    parser.add_argument(
+        "--generation-provenance",
+        choices=["natural", "controlled-replay"],
+        default="natural",
+        help="Label externally controlled token replay; this does not enable replay.",
+    )
     parser.add_argument("--tokens", type=int, default=2250)
     parser.add_argument("--solver", choices=["dpm", "sde"], default="dpm")
     parser.add_argument("--diffusion-steps", type=int, default=10)
@@ -158,8 +170,34 @@ def main() -> None:
         raise RuntimeError("Consumed diffusion trace disagrees with generation metrics")
     duration = len(audio) / 24000
     nonfinite_samples = int(audio.size - np.count_nonzero(np.isfinite(audio)))
+    natural_completion = args.generation_provenance == "natural" and (
+        metrics.stop_reason in ("eos", "speech_end")
+    )
+    failure: str | None = None
+    if args.mode == "completion":
+        if args.generation_provenance == "controlled-replay":
+            failure = "Controlled replay cannot establish natural completion"
+        elif not natural_completion:
+            failure = f"Incomplete generation: {metrics.stop_reason}"
+        elif not len(audio):
+            failure = "Empty audio"
+    elif len(audio) != args.tokens * 3200:
+        failure = (
+            f"Generated {duration:.2f}s, expected {args.tokens * 3200 / 24000:.2f}s"
+        )
+    if nonfinite_samples:
+        failure = "Non-finite audio"
     report = {
         "backend": args.backend,
+        "mode": args.mode,
+        "generation_provenance": args.generation_provenance,
+        "evaluation": {
+            "status": "complete" if natural_completion else "incomplete",
+            "passed": failure is None,
+            "failure": failure,
+            "natural_completion": natural_completion,
+            "natural_fidelity_eligible": args.mode == "completion" and failure is None,
+        },
         "segment_trace": {
             "consumed_diffusion_tokens": speech_offset,
             "controls": controls,
@@ -207,12 +245,8 @@ def main() -> None:
     report_json = json.dumps(report, indent=2, allow_nan=False)
     args.output.with_suffix(".json").write_text(report_json)
     print(report_json, flush=True)
-    if len(audio) != args.tokens * 3200:
-        raise RuntimeError(
-            f"Generated {duration:.2f}s, expected {args.tokens * 3200 / 24000:.2f}s"
-        )
-    if not report["finite"]:
-        raise RuntimeError("Non-finite audio")
+    if failure is not None:
+        raise RuntimeError(failure)
 
 
 if __name__ == "__main__":
