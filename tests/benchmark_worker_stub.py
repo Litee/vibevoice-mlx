@@ -45,8 +45,16 @@ class VoiceCloneData:
 
 def load_model(model: str, quantize_bits: int | None = None) -> tuple[object, object]:
     event("load_model", model=model, quantize_bits=quantize_bits)
-    bits = os.environ.get("BENCH_TEST_SOURCE_BITS")
-    return object(), SimpleNamespace(quantization={"bits": int(bits)} if bits else None)
+    source_bits = os.environ.get("BENCH_TEST_SOURCE_BITS")
+    effective_bits = int(source_bits) if source_bits else quantize_bits
+    layer = QuantizedLinear() if effective_bits else Linear()
+    if effective_bits:
+        layer.bits = effective_bits
+    return SimpleNamespace(
+        named_modules=lambda: [("projection", layer)]
+    ), SimpleNamespace(
+        quantization={"bits": int(source_bits)} if source_bits else None
+    )
 
 
 def load_audio(path: str) -> list[int]:
@@ -120,6 +128,20 @@ def write_audio(path: str, audio: list[float], sample_rate: int) -> None:
 
 
 module("mlx")
+nn = module("mlx.nn")
+
+
+class Linear:
+    weight = SimpleNamespace(dtype="float16")
+
+
+class QuantizedLinear:
+    bits = 4
+
+
+nn.Linear = nn.Embedding = Linear
+nn.QuantizedLinear = nn.QuantizedEmbedding = QuantizedLinear
+nn.RMSNorm = type("RMSNorm", (), {})
 core = module("mlx.core")
 core.array = lambda value: Array()
 core.float16 = "float16"
