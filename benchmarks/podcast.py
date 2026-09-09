@@ -157,6 +157,7 @@ def main() -> None:
     if speech_offset != metrics.num_speech_tokens:
         raise RuntimeError("Consumed diffusion trace disagrees with generation metrics")
     duration = len(audio) / 24000
+    nonfinite_samples = int(audio.size - np.count_nonzero(np.isfinite(audio)))
     report = {
         "backend": args.backend,
         "segment_trace": {
@@ -191,15 +192,21 @@ def main() -> None:
         "mlx_peak_memory_gib": mx.get_peak_memory() / 2**30,
         "process_peak_rss_gib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         / 2**30,
-        "finite": bool(np.isfinite(audio).all()),
-        "peak_amplitude": float(np.max(np.abs(audio))) if len(audio) else None,
+        "finite": nonfinite_samples == 0,
+        "nonfinite_samples": nonfinite_samples,
+        "peak_amplitude": (
+            float(np.max(np.abs(audio)))
+            if len(audio) and nonfinite_samples == 0
+            else None
+        ),
         "out_of_pcm_range_samples": int(np.count_nonzero(np.abs(audio) >= 1)),
         "metrics": metrics.summary(),
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     sf.write(str(args.output), audio, 24000, subtype="PCM_16")
-    args.output.with_suffix(".json").write_text(json.dumps(report, indent=2))
-    print(json.dumps(report, indent=2), flush=True)
+    report_json = json.dumps(report, indent=2, allow_nan=False)
+    args.output.with_suffix(".json").write_text(report_json)
+    print(report_json, flush=True)
     if len(audio) != args.tokens * 3200:
         raise RuntimeError(
             f"Generated {duration:.2f}s, expected {args.tokens * 3200 / 24000:.2f}s"

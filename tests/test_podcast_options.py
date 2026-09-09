@@ -14,6 +14,10 @@ import pytest
 SCRIPT = Path(__file__).resolve().parents[1] / "benchmarks" / "podcast.py"
 
 
+def reject_nonfinite_json(value: str) -> None:
+    raise ValueError(f"Nonstandard JSON number: {value}")
+
+
 @pytest.fixture
 def run_podcast(
     tmp_path: Path,
@@ -111,7 +115,12 @@ def test_options_reach_warmup_generation_and_report(
             "max_speech_tokens": tokens,
         }
         assert call["estimated_total"] == tokens
-    report = json.loads((tmp_path / "audio.json").read_text())
+    report = json.loads(
+        (tmp_path / "audio.json").read_text(), parse_constant=reject_nonfinite_json
+    )
+    assert report["finite"] is True
+    assert report["nonfinite_samples"] == 0
+    assert report["peak_amplitude"] == 0.25
     assert {key: report[key] for key in expected} == expected
     assert report["max_speech_tokens"] == 2
     assert report["script_sha256"] == hashlib.sha256(SCRIPT.read_bytes()).hexdigest()
@@ -176,12 +185,15 @@ def test_empty_generation_saves_diagnostics_before_failing(
 
     assert result.returncode != 0
     assert "Generated 0.00s, expected 0.27s" in result.stderr
-    report = json.loads((tmp_path / "audio.json").read_text())
+    report = json.loads(
+        (tmp_path / "audio.json").read_text(), parse_constant=reject_nonfinite_json
+    )
     assert report["audio_seconds"] == 0
     assert report["audio_seconds_per_wall_second"] == 0
     assert report["wall_seconds_per_audio_second"] is None
     assert report["peak_amplitude"] is None
     assert report["finite"] is True
+    assert report["nonfinite_samples"] == 0
     assert report["out_of_pcm_range_samples"] == 0
     assert report["metrics"]["speech_tokens"] == 0
     assert report["max_speech_tokens"] == 2
@@ -191,6 +203,34 @@ def test_empty_generation_saves_diagnostics_before_failing(
         "end_start_diffusion_transitions": [],
     }
     assert '"name": "restored", "value": true' in result.stdout
+
+
+@pytest.mark.parametrize("sample", ["nan", "inf", "-inf"])
+def test_nonfinite_audio_saves_strict_json_diagnostics_before_failing(
+    run_podcast: Callable[[list[str]], subprocess.CompletedProcess[str]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    sample: str,
+) -> None:
+    monkeypatch.setenv("PODCAST_NONFINITE_AUDIO", sample)
+    result = run_podcast([])
+
+    assert result.returncode != 0
+    assert "Non-finite audio" in result.stderr
+    report_text = (tmp_path / "audio.json").read_text()
+    report = json.loads(report_text, parse_constant=reject_nonfinite_json)
+    stdout_report = "\n".join(
+        line
+        for line in result.stdout.splitlines()
+        if not line.startswith("PODCAST_EVENT:")
+    )
+    assert json.loads(stdout_report, parse_constant=reject_nonfinite_json) == report
+    assert report["finite"] is False
+    assert report["nonfinite_samples"] == 1
+    assert report["peak_amplitude"] is None
+    assert report["metrics"]["speech_tokens"] == 2
+    assert report["segment_trace"]["consumed_diffusion_tokens"] == 2
+    assert report["audio_seconds"] == 6400 / 24000
 
 
 @pytest.mark.parametrize(
