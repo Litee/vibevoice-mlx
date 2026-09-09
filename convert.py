@@ -23,7 +23,7 @@ from mlx.utils import tree_flatten
 
 from vibevoice_mlx.load_weights import (
     _load_safetensors, _map_hf_key, _quantize_predicate, _resolve_quantize_bits,
-    load_config, resolve_model_path,
+    detect_tokenizer, load_config, resolve_model_path,
 )
 from vibevoice_mlx.model import VibeVoiceConfig, VibeVoiceModel
 
@@ -32,24 +32,12 @@ MODEL_IDS = {
     "7b": "vibevoice/VibeVoice-7B",
 }
 
-TOKENIZER_IDS = {
-    "1.5b": "Qwen/Qwen2.5-1.5B",
-    "7b": "Qwen/Qwen2.5-7B",
-}
-
 # 5GB shard threshold
 SHARD_SIZE = 5 * 1024 * 1024 * 1024
 _CHECKPOINT_NAME = re.compile(
     r"model(?:-\d{5}-of-\d{5})?\.safetensors|model\.safetensors\.index\.json"
 )
 _TEMPLATE_NAME = re.compile(r"chat_template\.jinja|additional_chat_templates/[^/]+\.jinja")
-
-
-def _detect_tokenizer_id(config) -> str:
-    """Pick the right Qwen2.5 tokenizer based on vocab size."""
-    if config.vocab_size <= 151936:
-        return "Qwen/Qwen2.5-1.5B"
-    return "Qwen/Qwen2.5-7B"
 
 
 def convert_model(model_id: str, output_dir: Path, tokenizer_id: str | None = None,
@@ -135,7 +123,8 @@ def convert_model(model_id: str, output_dir: Path, tokenizer_id: str | None = No
     ) as temporary:
         staging = Path(temporary)
         _write_converted_bundle(
-            model_id, staging, mapped, config, quantization_meta, tokenizer_id,
+            model_id, staging, mapped, config, quantization_meta,
+            tokenizer_id or detect_tokenizer(model_path, config),
         )
         current_files = {
             path.relative_to(staging).as_posix() for path in staging.rglob("*") if path.is_file()
@@ -162,7 +151,7 @@ def convert_model(model_id: str, output_dir: Path, tokenizer_id: str | None = No
 
 def _write_converted_bundle(
     model_id: str, output_dir: Path, mapped: dict[str, mx.array],
-    config: VibeVoiceConfig, quantization_meta: dict | None, tokenizer_id: str | None,
+    config: VibeVoiceConfig, quantization_meta: dict | None, tokenizer_id: str,
 ) -> None:
     """Finish all fallible serialization before publishing checkpoint files."""
 
@@ -204,8 +193,7 @@ def _write_converted_bundle(
         json.dump(config_dict, f, indent=2)
 
     # Copy tokenizer
-    tok_id = tokenizer_id or _detect_tokenizer_id(config)
-    _copy_tokenizer(output_dir, tok_id)
+    _copy_tokenizer(output_dir, tokenizer_id)
 
     # Model card
     _write_model_card(output_dir, model_id)
@@ -316,7 +304,7 @@ def main():
         for tag in tags:
             model_id = MODEL_IDS[tag]
             out = base / f"vibevoice-{tag}-mlx"
-            convert_model(model_id, out, tokenizer_id=TOKENIZER_IDS[tag],
+            convert_model(model_id, out, tokenizer_id=args.tokenizer,
                           quantize_bits=args.quantize)
             if args.upload:
                 upload(out, f"{args.hf_prefix}/vibevoice-{tag}-mlx")

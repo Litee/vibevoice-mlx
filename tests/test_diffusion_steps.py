@@ -120,6 +120,8 @@ def test_cli_accepts_supported_steps(
         raise ModelLoadReached
 
     monkeypatch.setattr(e2e_pipeline, "load_model", reached_load)
-    monkeypatch.setattr(sys, "argv", ["vibevoice-mlx", "--text", "Hello", *arguments])
+    monkeypatch.setattr(
+        sys, "argv", ["vibevoice-mlx", "--model", ".", "--text", "Hello", *arguments]
+    )
     with pytest.raises(ModelLoadReached):
         e2e_pipeline.main()
