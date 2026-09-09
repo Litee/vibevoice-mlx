@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from argparse import Namespace
 from pathlib import Path
 from typing import Any
@@ -87,9 +88,7 @@ def test_benchmark_model_cannot_execute_python(
     args = Namespace(
         model=model, voice_arg="voice.safetensors", text="Hello", seed=17, max_tokens=9
     )
-    result = benchmark.run_config(
-        "int8", {"quantize": 8, "coreml_semantic": True}, args, audio_dir=tmp_path
-    )
+    result = benchmark.run_config("int8", {"quantize": 8}, args, audio_dir=tmp_path)
 
     assert result is not None
     assert result["audio_s"] == 2.0
@@ -106,7 +105,6 @@ def test_benchmark_model_cannot_execute_python(
     }
     assert observed["semantic"]["model"] == model
     assert observed["detect_tokenizer"]["model"] == model
-    assert "coreml_fallback" in observed
     assert observed["load_voice"]["path"] == "voice.safetensors"
     assert observed["generate"] == {
         "name": "generate",
@@ -211,3 +209,145 @@ def test_benchmark_can_disable_semantic_voice_and_audio_output(
         not {"semantic", "coreml_fallback", "load_voice", "encode_voice", "write_audio"}
         & observed.keys()
     )
+
+
+def test_unavailable_coreml_is_not_benchmarked_as_mlx(
+    workers: list[subprocess.CompletedProcess[str]], capsys: pytest.CaptureFixture[str]
+) -> None:
+    args = Namespace(model="model", voice_arg=None, text="Hello", seed=0, max_tokens=1)
+    result = benchmark.run_config(
+        "fp16, coreml-semantic", {"coreml_semantic": True}, args
+    )
+
+    assert result is None
+    assert "Requested coreml semantic backend is unavailable" in capsys.readouterr().out
+    assert "generate" not in events(workers[-1])
+
+
+def test_packed_checkpoint_is_not_benchmarked_as_fp16(
+    workers: list[subprocess.CompletedProcess[str]],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("BENCH_TEST_SOURCE_BITS", "4")
+    args = Namespace(model="model", voice_arg=None, text="Hello", seed=0, max_tokens=1)
+    assert benchmark.run_config("fp16", {}, args) is None
+    assert "Requested fp16 quantization, but loaded int4" in capsys.readouterr().out
+    assert "generate" not in events(workers[-1])
+
+
+def test_successful_result_reports_requested_and_effective_configuration(
+    workers: list[subprocess.CompletedProcess[str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("BENCH_TEST_SOURCE_BITS", "4")
+    args = Namespace(
+        model="model", voice_arg="voice.safetensors", text="Hello", seed=0, max_tokens=1
+    )
+    result = benchmark.run_config("int4", {"quantize": 4}, args)
+    assert result is not None
+    assert result["requested"] == {
+        "quantization": "int4",
+        "semantic_backend": "mlx",
+        "voice_reference": "cached",
+    }
+    assert result["effective"] == {
+        "quantization": "int4",
+        "semantic_backend": "mlx",
+        "voice_reference": "cached",
+    }
+
+
+def test_cli_stops_when_requested_voice_encoding_fails(
+    workers: list[subprocess.CompletedProcess[str]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BENCH_TEST_VOICE_FAILURE", "1")
+    child = benchmark.subprocess.run(
+        [
+            sys.executable,
+            str(Path(benchmark.__file__).resolve()),
+            "--model",
+            "model",
+            "--ref-audio",
+            "voice.wav",
+            "--save-audio",
+            str(tmp_path),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert child.returncode != 0
+    assert "Cannot benchmark the requested voice reference" in child.stderr
+    assert "generate" not in events(child)
+
+
+@pytest.mark.parametrize(
+    ("env", "message"),
+    [
+        ("BENCH_TEST_MISSING_MLX", "Requested mlx semantic backend is unavailable"),
+        (
+            "BENCH_TEST_MISSING_VOICE",
+            "Requested voice reference did not produce voice embeddings",
+        ),
+    ],
+)
+def test_missing_requested_conditioning_stops_before_generation(
+    env: str,
+    message: str,
+    workers: list[subprocess.CompletedProcess[str]],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv(env, "1")
+    args = Namespace(
+        model="model", voice_arg="voice.wav", text="Hello", seed=0, max_tokens=1
+    )
+    assert benchmark.run_config("fp16", {}, args) is None
+    assert message in capsys.readouterr().out
+    assert "generate" not in events(workers[-1])
+
+
+def test_coreml_and_unconditioned_metadata_are_reported(
+    workers: list[subprocess.CompletedProcess[str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("BENCH_TEST_COREML_AVAILABLE", "1")
+    args = Namespace(model="model", voice_arg=None, text="Hello", seed=0, max_tokens=1)
+    result = benchmark.run_config(
+        "fp16, coreml-semantic", {"coreml_semantic": True}, args
+    )
+    expected = {
+        "quantization": "fp16",
+        "semantic_backend": "coreml",
+        "voice_reference": "none",
+    }
+    assert result is not None
+    assert result["requested"] == expected
+    assert result["effective"] == expected
+
+
+def test_cli_persists_configuration_metadata(
+    workers: list[subprocess.CompletedProcess[str]], tmp_path: Path
+) -> None:
+    child = benchmark.subprocess.run(
+        [
+            sys.executable,
+            str(Path(benchmark.__file__).resolve()),
+            "--model",
+            "model",
+            "--save-audio",
+            str(tmp_path),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert child.returncode == 0, child.stderr
+    rows = json.loads((tmp_path / "1.5b" / "results.json").read_text())
+    assert len(rows) == 6  # Three unavailable CoreML configurations are excluded.
+    assert rows[0][1]["effective"] == {
+        "quantization": "fp16",
+        "semantic_backend": "mlx",
+        "voice_reference": "none",
+    }
+    assert rows[1][1]["effective"]["semantic_backend"] == "none"
+    assert all(result["requested"] == result["effective"] for _, result in rows)
