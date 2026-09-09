@@ -191,7 +191,8 @@ Text ──→ Qwen2.5 LLM backbone ──→ control tokens
                          Disable trimming, including with silence detection
 --silence-threshold N    RMS threshold used by waveform trimming (default: 0.05)
 --silence-min-duration-ms N
-                         Long silence gap used by forward trimming (default: 1500)
+                         Accepted for compatibility; trailing-only trimming
+                         does not use it (default: 1500)
 --silence-pad-ms N       Audio retained after a detected cut (default: 300)
 --seed INT               Random seed (default: 42)
 --no-semantic            Disable semantic encoder feedback
@@ -204,10 +205,10 @@ Complete tokenizer assets in the resolved model bundle take precedence.
 Legacy bundles without them fall back to the Qwen tokenizer selected for the
 model vocabulary. Explicit `--tokenizer` values always win.
 
-When waveform trimming is enabled, the current implementation cuts at the
-first qualifying long silence after speech begins and then removes terminal
-silence. Use `--no-trim-trailing-silence` for dialogue where long internal
-pauses must be preserved.
+When waveform trimming is enabled, the implementation scans backward and
+removes only silence at the end of the waveform. Speech after an internal pause
+is preserved. Use `--no-trim-trailing-silence` to retain the complete waveform,
+including terminal silence.
 
 ## Optimizations
 
