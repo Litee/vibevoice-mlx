@@ -25,6 +25,19 @@ def resolve_model_path(model_id_or_path: str) -> Path:
     return Path(snapshot_download(model_id_or_path))
 
 
+def detect_tokenizer(model_path: Path, config: VibeVoiceConfig) -> str:
+    """Prefer tokenizer assets in a resolved bundle, then the legacy Qwen default."""
+    has_tokenizer_data = (model_path / "tokenizer.json").is_file() or (
+        (model_path / "vocab.json").is_file()
+        and (model_path / "merges.txt").is_file()
+    )
+    if (model_path / "tokenizer_config.json").is_file() and has_tokenizer_data:
+        return str(model_path)
+    if config.vocab_size <= 151936:
+        return "Qwen/Qwen2.5-1.5B"
+    return "Qwen/Qwen2.5-7B"
+
+
 def load_config(model_path: Path) -> VibeVoiceConfig:
     """Load VibeVoiceConfig from config.json.
 

@@ -33,7 +33,7 @@ from .generate import (
     _validate_generation_options,
     generate,
 )
-from .load_weights import load_model, resolve_model_path
+from .load_weights import detect_tokenizer, load_model, resolve_model_path
 from .model import VibeVoiceConfig, VibeVoiceModel
 
 SemanticCallbacks = tuple[Callable[[np.ndarray], np.ndarray], Callable[[], None]]
@@ -506,20 +506,6 @@ def _try_mlx_semantic(
         return None
 
 
-def _detect_tokenizer(model_id: str, config: VibeVoiceConfig) -> str:
-    """Prefer a local bundle's tokenizer, otherwise use the legacy Qwen default."""
-    model_path = Path(model_id)
-    has_tokenizer_data = (model_path / "tokenizer.json").is_file() or (
-        (model_path / "vocab.json").is_file()
-        and (model_path / "merges.txt").is_file()
-    )
-    if (model_path / "tokenizer_config.json").is_file() and has_tokenizer_data:
-        return str(model_path)
-    if config.vocab_size <= 151936:
-        return "Qwen/Qwen2.5-1.5B"
-    return "Qwen/Qwen2.5-7B"
-
-
 def main():
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -605,7 +591,8 @@ def main():
         parser.error("--text is required for synthesis (or use --ref-audio with --save-voice for voice encoding)")
 
     # Load model
-    model, config = load_model(args.model, quantize_bits=args.quantize)
+    model_path = resolve_model_path(args.model)
+    model, config = load_model(str(model_path), quantize_bits=args.quantize)
 
     # Optionally quantize diffusion head for faster inference
     if args.quantize_diffusion:
@@ -622,7 +609,7 @@ def main():
         mx.eval(model.diffusion_head.parameters())
 
     # Tokenize (with optional voice cloning)
-    tokenizer_name = args.tokenizer or _detect_tokenizer(args.model, config)
+    tokenizer_name = args.tokenizer or detect_tokenizer(model_path, config)
     print(f"Using tokenizer: {tokenizer_name}")
 
     text = args.text.replace("\\n", "\n")

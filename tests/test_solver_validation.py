@@ -51,7 +51,9 @@ def test_cli_rejects_unsupported_solver_before_loading(
 def test_cli_accepts_supported_solvers(
     arguments: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(sys, "argv", ["vibevoice-mlx", "--text", "Hello", *arguments])
+    monkeypatch.setattr(
+        sys, "argv", ["vibevoice-mlx", "--model", ".", "--text", "Hello", *arguments]
+    )
     with (
         patch.object(
             e2e_pipeline, "load_model", side_effect=ModelLoadReachedError

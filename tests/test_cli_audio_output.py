@@ -20,6 +20,8 @@ def _prepare_synthesis(
         "argv",
         [
             "vibevoice-mlx",
+            "--model",
+            str(output.parent),
             "--text",
             "Hello",
             "--no-semantic",

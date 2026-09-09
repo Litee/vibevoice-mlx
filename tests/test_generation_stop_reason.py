@@ -137,6 +137,8 @@ def test_cli_prints_incomplete_generation_warning(
         "argv",
         [
             "vibevoice-mlx",
+            "--model",
+            str(tmp_path),
             "--text",
             "Hello",
             "--no-semantic",

@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
+import huggingface_hub
 import numpy as np
 import pytest
 import test_tokenizer_trust
@@ -14,6 +15,7 @@ from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
 from transformers import AutoTokenizer, PreTrainedTokenizerFast
 
+import convert
 from vibevoice_mlx import e2e_pipeline
 from vibevoice_mlx.generate import GenerationMetrics
 from vibevoice_mlx.model import VibeVoiceConfig
@@ -50,16 +52,23 @@ def generated_prompts(monkeypatch: pytest.MonkeyPatch) -> list[list[int]]:
 
 
 @pytest.mark.parametrize("override", [False, True])
+@pytest.mark.parametrize("source", ["local", "hub"])
 def test_cli_uses_bundled_tokenizer_offline_unless_overridden(
     tiny_checkpoint: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     generated_prompts: list[list[int]],
     override: bool,
+    source: str,
 ) -> None:
     tokenizer_with_hello(5).save_pretrained(tiny_checkpoint)
     alternate = tmp_path / "alternate"
     tokenizer_with_hello(6).save_pretrained(alternate)
+    monkeypatch.setattr(
+        huggingface_hub,
+        "snapshot_download",
+        lambda *args, **kwargs: str(tiny_checkpoint),
+    )
 
     def reject_network(*args: object, **kwargs: object) -> None:
         raise AssertionError("Local synthesis must not request Hub assets")
@@ -72,7 +81,7 @@ def test_cli_uses_bundled_tokenizer_offline_unless_overridden(
         [
             "vibevoice-mlx",
             "--model",
-            str(tiny_checkpoint),
+            str(tiny_checkpoint) if source == "local" else "example/bundled-model",
             "--text",
             "Hello",
             "--no-semantic",
@@ -90,22 +99,93 @@ def test_cli_uses_bundled_tokenizer_offline_unless_overridden(
     assert output.exists()
 
 
+@pytest.mark.parametrize("override", [False, True])
+@pytest.mark.parametrize("source", ["local", "hub"])
+@pytest.mark.parametrize("route", ["api", "builtin_cli"])
+def test_reconversion_preserves_source_tokenizer_unless_overridden(
+    tiny_checkpoint: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    override: bool,
+    source: str,
+    route: str,
+) -> None:
+    tokenizer = tokenizer_with_hello(5)
+    tokenizer.add_special_tokens({"additional_special_tokens": ["<voice>"]})
+    tokenizer.chat_template = {"default": "{{ messages }}", "tool_use": "tools"}
+    tokenizer.save_pretrained(tiny_checkpoint)
+    alternate = tmp_path / "alternate"
+    tokenizer_with_hello(6).save_pretrained(alternate)
+    monkeypatch.setattr(
+        huggingface_hub,
+        "snapshot_download",
+        lambda *args, **kwargs: str(tiny_checkpoint),
+    )
+
+    def reject_network(*args: object, **kwargs: object) -> None:
+        raise AssertionError("Reconversion must use the resolved bundle tokenizer")
+
+    monkeypatch.setattr(httpx.Client, "send", reject_network)
+    output = tmp_path / "converted"
+
+    model_id = str(tiny_checkpoint) if source == "local" else "example/bundled-model"
+    if route == "api":
+        convert.convert_model(
+            model_id,
+            output,
+            tokenizer_id=str(alternate) if override else None,
+        )
+    else:
+        monkeypatch.setitem(convert.MODEL_IDS, "1.5b", model_id)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "convert.py",
+                "--models",
+                "1.5b",
+                "--output-dir",
+                str(output),
+                *(["--tokenizer", str(alternate)] if override else []),
+            ],
+        )
+        convert.main()
+        output = output / "vibevoice-1.5b-mlx"
+
+    restored = AutoTokenizer.from_pretrained(output, trust_remote_code=False)
+    assert restored.encode("Hello") == [6 if override else 5]
+    if not override:
+        assert restored.encode("<voice>") == [6]
+        assert restored.chat_template == {
+            "default": "{{ messages }}",
+            "tool_use": "tools",
+        }
+
+
 @pytest.mark.parametrize("vocab_size", [151936, 152064])
+@pytest.mark.parametrize("route", ["inference", "conversion"])
 @pytest.mark.parametrize(
     "source",
     ["remote", "empty_directory", "config_only", "tokenizer_only", "vocab_only"],
 )
 def test_cli_preserves_legacy_tokenizer_fallback(
+    tiny_checkpoint: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     generated_prompts: list[list[int]],
     vocab_size: int,
     source: str,
+    route: str,
 ) -> None:
+    directory = tiny_checkpoint
+    config_data = json.loads((directory / "config.json").read_text())
+    config_data["vocab_size"] = vocab_size
+    (directory / "config.json").write_text(json.dumps(config_data))
+    monkeypatch.setattr(
+        huggingface_hub, "snapshot_download", lambda *args, **kwargs: str(directory)
+    )
     model_id = "example/legacy-model"
     if source != "remote":
-        directory = tmp_path / "legacy-model"
-        directory.mkdir()
         if source == "config_only":
             (directory / "tokenizer_config.json").write_text("{}")
         elif source == "tokenizer_only":
@@ -142,11 +222,14 @@ def test_cli_preserves_legacy_tokenizer_fallback(
         ],
     )
 
-    e2e_pipeline.main()
+    if route == "inference":
+        e2e_pipeline.main()
+        assert 5 in generated_prompts[0]
+    else:
+        convert.convert_model(model_id, tmp_path / "converted")
 
     expected = "Qwen/Qwen2.5-1.5B" if vocab_size <= 151936 else "Qwen/Qwen2.5-7B"
     assert requests == [(expected, False)]
-    assert 5 in generated_prompts[0]
 
 
 def test_cli_uses_bundled_qwen_vocabulary_and_merges(
@@ -191,22 +274,33 @@ def test_cli_uses_bundled_qwen_vocabulary_and_merges(
     assert 7 in generated_prompts[0]
 
 
-def test_cli_bundled_tokenizer_still_rejects_custom_code(
+@pytest.mark.parametrize("route", ["inference", "conversion"])
+@pytest.mark.parametrize("source", ["local", "hub"])
+def test_bundled_tokenizer_still_rejects_custom_code(
     tiny_checkpoint: Path,
     custom_tokenizer: tuple[Path, Path],
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    route: str,
+    source: str,
 ) -> None:
     custom, marker = custom_tokenizer
     tokenizer_with_hello(5).save_pretrained(tiny_checkpoint)
     for name in ("tokenizer_config.json", "tokenization_fixture.py"):
         (tiny_checkpoint / name).write_bytes((custom / name).read_bytes())
     monkeypatch.setattr(
+        huggingface_hub,
+        "snapshot_download",
+        lambda *args, **kwargs: str(tiny_checkpoint),
+    )
+    model_id = str(tiny_checkpoint) if source == "local" else "example/custom-model"
+    monkeypatch.setattr(
         sys,
         "argv",
         [
             "vibevoice-mlx",
             "--model",
-            str(tiny_checkpoint),
+            model_id,
             "--text",
             "Hello",
             "--no-semantic",
@@ -214,6 +308,9 @@ def test_cli_bundled_tokenizer_still_rejects_custom_code(
     )
 
     with pytest.raises(ValueError, match="trust_remote_code"):
-        e2e_pipeline.main()
+        if route == "inference":
+            e2e_pipeline.main()
+        else:
+            convert.convert_model(model_id, tmp_path / "converted")
 
     assert not marker.exists()

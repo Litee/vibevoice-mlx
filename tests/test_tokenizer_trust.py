@@ -166,8 +166,7 @@ def _run_route(
         saved = output / "converted_output"
         if route == "builtin":
             monkeypatch.setitem(convert.MODEL_IDS, "1.5b", str(checkpoint))
-            monkeypatch.setitem(convert.TOKENIZER_IDS, "1.5b", str(tokenizer_path))
-            model_args = ["--models", "1.5b"]
+            model_args = ["--models", "1.5b", "--tokenizer", str(tokenizer_path)]
             saved = saved / "vibevoice-1.5b-mlx"
         else:
             model_args = [
