@@ -95,10 +95,55 @@ def load_config(model_path: Path) -> VibeVoiceConfig:
 
 
 def _load_safetensors(model_path: Path) -> dict[str, mx.array]:
-    """Load all safetensors files from a model directory."""
+    """Load indexed shards, or all safetensors for legacy checkpoints."""
+    index_path = model_path / "model.safetensors.index.json"
+    if index_path.exists():
+        with index_path.open() as f:
+            index = json.load(f)
+        weight_map = index.get("weight_map") if isinstance(index, dict) else None
+        if (
+            not isinstance(weight_map, dict)
+            or not weight_map
+            or any(
+                not isinstance(name, str)
+                or not name
+                or not isinstance(filename, str)
+                or not filename
+                for name, filename in weight_map.items()
+            )
+        ):
+            raise ValueError(
+                f"Invalid {index_path.name}: weight_map must map tensor names to shard filenames"
+            )
+        shard_names = sorted(set(weight_map.values()))
+    else:
+        weight_map = None
+        shard_names = sorted(p.name for p in model_path.glob("*.safetensors"))
     weights = {}
-    for sf_file in sorted(model_path.glob("*.safetensors")):
-        weights.update(mx.load(str(sf_file)))
+    sources: dict[str, str] = {}
+    for shard_name in shard_names:
+        if Path(shard_name).is_absolute() or ".." in Path(shard_name).parts:
+            raise ValueError(f"Invalid checkpoint shard path: {shard_name!r}")
+        shard_path = model_path / shard_name
+        if not shard_path.is_file():
+            raise FileNotFoundError(f"Checkpoint shard not found: {shard_name}")
+        shard = mx.load(str(shard_path))
+        if weight_map is None:
+            for name in shard:
+                if name in sources:
+                    raise ValueError(
+                        f"Duplicate tensor {name!r} in {sources[name]} and {shard_name}"
+                    )
+                sources[name] = shard_name
+            weights.update(shard)
+        else:
+            for name, file in weight_map.items():
+                if file == shard_name:
+                    if name not in shard:
+                        raise ValueError(
+                            f"Indexed tensor {name!r} missing from {shard_name}"
+                        )
+                    weights[name] = shard[name]
     return weights
 
 
