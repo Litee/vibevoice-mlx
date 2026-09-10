@@ -46,19 +46,14 @@ def assert_same(actual: mx.array, expected: mx.array) -> None:
 
 
 @pytest.mark.parametrize("bits", [None, 4, 8], ids=["fp16", "int4", "int8"])
-@pytest.mark.parametrize(
-    "fuse_qkv,fuse_gate_up", [(True, False), (False, True), (True, True)]
-)
 def test_fusion_preserves_prefill_decode_tokens_and_caches(
     bits: int | None,
-    fuse_qkv: bool,
-    fuse_gate_up: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     model = make_model(bits)
     reference = make_model(bits)
     reference.load_weights(tree_flatten(model.parameters()))
-    lm = FastLM(model, model.config, fuse_qkv=fuse_qkv, fuse_gate_up=fuse_gate_up)
+    lm = FastLM(model, model.config)
     caches = [KVCache(2, growth_step=4), KVCache(2, growth_step=4)]
     calls: list[dict] = []
     original_mm = fast_forward._mm
@@ -82,17 +77,12 @@ def test_fusion_preserves_prefill_decode_tokens_and_caches(
         )
         # Output parity alone also passes if fusion silently stops activating.
         for layer in lm.layers:
-            for key, names, enabled in (
-                ("qkv", ("q", "k", "v"), fuse_qkv),
-                ("gu", ("g", "u"), fuse_gate_up),
-            ):
-                assert (layer[key] is not None) == enabled
-                if enabled:
-                    assert sum(weights is layer[key] for weights in calls) == 1
-                for name in names:
-                    assert sum(weights is layer[name] for weights in calls) == (
-                        0 if enabled else 1
-                    )
+            assert layer["gu"] is not None
+            assert sum(weights is layer["gu"] for weights in calls) == 1
+            for name in ("g", "u"):
+                assert sum(weights is layer[name] for weights in calls) == 0
+            for name in ("q", "k", "v"):
+                assert sum(weights is layer[name] for weights in calls) == 1
         assert_same(actual, expected)
         assert lm.select_token(actual[:, -1:]) == lm.select_token(expected[:, -1:])
         assert lm.select_token(actual[:, -1:], speech_only=True) == lm.select_token(
@@ -105,64 +95,53 @@ def test_fusion_preserves_prefill_decode_tokens_and_caches(
 
 
 @pytest.mark.parametrize("bits", [None, 4, 8], ids=["fp16", "int4", "int8"])
-@pytest.mark.parametrize(
-    "fuse_qkv,fuse_gate_up", [(True, False), (False, True), (True, True)]
-)
 def test_fused_parameters_share_backing_storage(
-    bits: int | None, fuse_qkv: bool, fuse_gate_up: bool
+    bits: int | None,
 ) -> None:
     model = make_model(bits)
-    lm = FastLM(model, model.config, fuse_qkv=fuse_qkv, fuse_gate_up=fuse_gate_up)
+    attention_ids = [
+        id(getattr(layer.self_attn, name).weight)
+        for layer in model.model.layers
+        for name in ("q_proj", "k_proj", "v_proj")
+    ]
+    lm = FastLM(model, model.config)
     fields = {"w": "weight"}
     if bits is not None:
         fields.update(s="scales", b="biases")
 
     for module, layer in zip(model.model.layers, lm.layers, strict=True):
-        attention, mlp = module.self_attn, module.mlp
-        for key, projections in (
-            (
-                "qkv",
-                (
-                    ("q", attention.q_proj),
-                    ("k", attention.k_proj),
-                    ("v", attention.v_proj),
-                ),
-            ),
-            ("gu", (("g", mlp.gate_proj), ("u", mlp.up_proj))),
-        ):
-            if layer[key] is None:
-                continue
-            offset = 0
-            for name, projection in projections:
-                size = projection.weight.shape[0]
-                for field, attribute in fields.items():
-                    parameter = getattr(projection, attribute)
-                    assert layer[name][field] is parameter
-                    # NumPy exposes the evaluated MLX buffer without copying.
-                    # Compare storage directly, avoiding allocator noise from
-                    # other arrays or processes in a memory-counter assertion.
-                    backing = np.asarray(layer[key][field])
-                    actual = np.asarray(parameter)
-                    expected = backing[offset : offset + size]
-                    assert np.shares_memory(actual, backing)
-                    assert actual.shape == expected.shape
-                    assert actual.strides == expected.strides
-                    assert actual.ctypes.data == expected.ctypes.data
-                offset += size
+        projections = (("g", module.mlp.gate_proj), ("u", module.mlp.up_proj))
+        offset = 0
+        for name, projection in projections:
+            size = projection.weight.shape[0]
+            for field, attribute in fields.items():
+                parameter = getattr(projection, attribute)
+                assert layer[name][field] is parameter
+                # NumPy exposes the evaluated MLX buffer without copying.
+                backing = np.asarray(layer["gu"][field])
+                actual = np.asarray(parameter)
+                expected = backing[offset : offset + size]
+                assert np.shares_memory(actual, backing)
+                assert actual.shape == expected.shape
+                assert actual.strides == expected.strides
+                assert actual.ctypes.data == expected.ctypes.data
+            offset += size
+    assert attention_ids == [
+        id(getattr(layer.self_attn, name).weight)
+        for layer in model.model.layers
+        for name in ("q_proj", "k_proj", "v_proj")
+    ]
 
 
 @pytest.mark.parametrize("bits", [None, 4, 8], ids=["fp16", "int4", "int8"])
-@pytest.mark.parametrize(
-    "fuse_qkv,fuse_gate_up", [(True, False), (False, True), (True, True)]
-)
 def test_fusion_preserves_dual_decode_with_different_cache_lengths(
-    bits: int | None, fuse_qkv: bool, fuse_gate_up: bool
+    bits: int | None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     model = make_model(bits)
     reference = make_model(bits)
     reference.load_weights(tree_flatten(model.parameters()))
-    fused = FastLM(model, model.config, fuse_qkv=fuse_qkv, fuse_gate_up=fuse_gate_up)
-    separate = FastLM(reference, reference.config, fuse_qkv=False, fuse_gate_up=False)
+    fused = FastLM(model, model.config)
+    separate = FastLM(reference, reference.config, fuse_gate_up=False)
     fused_caches = [KVCache(2, growth_step=4), KVCache(2, growth_step=4)]
     separate_caches = [KVCache(2, growth_step=4), KVCache(2, growth_step=4)]
     for index, count in enumerate((3, 1)):
@@ -176,9 +155,32 @@ def test_fusion_preserves_dual_decode_with_different_cache_lengths(
         ]
         main_rope = compute_rope(mx.array([3 + step]), 16, 1_000_000)
         negative_rope = compute_rope(mx.array([1 + step]), 16, 1_000_000)
-        actual = fused.forward_dual(
-            main, *main_rope, fused_caches[0], negative, *negative_rope, fused_caches[1]
-        )
+        calls: list[dict] = []
+        original_mm = fast_forward._mm
+
+        def record_mm(
+            x: mx.array,
+            weights: dict,
+            call_log: list[dict] = calls,
+            mm=original_mm,
+        ) -> mx.array:
+            call_log.append(weights)
+            return mm(x, weights)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(fast_forward, "_mm", record_mm)
+            actual = fused.forward_dual(
+                main,
+                *main_rope,
+                fused_caches[0],
+                negative,
+                *negative_rope,
+                fused_caches[1],
+            )
+        for layer in fused.layers:
+            assert sum(weights is layer["gu"] for weights in calls) == 1
+            assert sum(weights is layer["g"] for weights in calls) == 0
+            assert sum(weights is layer["u"] for weights in calls) == 0
         expected = separate.forward_dual(
             main,
             *main_rope,
@@ -243,43 +245,78 @@ def test_packed_model_preserves_checkpoint_schema_and_reload_output(
     )
 
 
-@pytest.mark.parametrize("mismatch", ["format", "bits", "group_size", "dtype", "bias"])
-def test_mixed_projection_formats_and_biases_preserve_output(mismatch: str) -> None:
+@pytest.mark.parametrize("mismatch", ["format", "bits", "group_size", "dtype"])
+def test_incompatible_gate_up_falls_back_without_mutation(mismatch: str) -> None:
     models = [make_model(), make_model()]
     for model in models:
-        attention = model.model.layers[0].self_attn
         mlp = model.model.layers[0].mlp
         if mismatch in ("format", "bits", "group_size"):
-            attention.q_proj = nn.QuantizedLinear.from_linear(
-                attention.q_proj, bits=4, group_size=64
-            )
             mlp.gate_proj = nn.QuantizedLinear.from_linear(
                 mlp.gate_proj, bits=4, group_size=64
             )
             if mismatch != "format":
                 bits = 8 if mismatch == "bits" else 4
                 group_size = 32 if mismatch == "group_size" else 64
-                attention.k_proj = nn.QuantizedLinear.from_linear(
-                    attention.k_proj, bits=bits, group_size=group_size
-                )
-                attention.v_proj = nn.QuantizedLinear.from_linear(
-                    attention.v_proj, bits=bits, group_size=group_size
-                )
                 mlp.up_proj = nn.QuantizedLinear.from_linear(
                     mlp.up_proj, bits=bits, group_size=group_size
                 )
-        elif mismatch == "dtype":
-            attention.q_proj.weight = attention.q_proj.weight.astype(mx.float32)
-            mlp.gate_proj.weight = mlp.gate_proj.weight.astype(mx.float32)
         else:
-            del attention.k_proj.bias
-            attention.q_proj.bias = mx.full((64,), 0.125, dtype=mx.float16)
-            attention.v_proj.bias = mx.full((32,), -0.25, dtype=mx.float16)
-            mlp.gate_proj.bias = mx.full((128,), 0.25, dtype=mx.float16)
+            mlp.gate_proj.weight = mlp.gate_proj.weight.astype(mx.float32)
+    first = models[0].model.layers[0].mlp
+    original_ids = (id(first.gate_proj.weight), id(first.up_proj.weight))
     lm = FastLM(models[0], models[0].config)
+    assert lm.layers[0]["gu"] is None
+    assert original_ids == (id(first.gate_proj.weight), id(first.up_proj.weight))
+    assert lm.layers[1]["gu"] is not None
     h = mx.random.normal((1, 3, 64)).astype(mx.float16)
     cos, sin = compute_rope(mx.arange(3), 16, 1_000_000)
     actual = lm.prefill(h, cos, sin, "causal", KVCache(2))
     expected = models[1].model(h, cos, sin, "causal")
     assert actual.dtype == expected.dtype
     assert mx.allclose(actual, expected, atol=3e-3, rtol=3e-3).item()
+
+
+def test_disabled_fusion_does_not_mutate_projection_parameters() -> None:
+    model = make_model(8)
+    projections = [
+        projection
+        for layer in model.model.layers
+        for projection in (
+            layer.self_attn.q_proj,
+            layer.self_attn.k_proj,
+            layer.self_attn.v_proj,
+            layer.mlp.gate_proj,
+            layer.mlp.up_proj,
+        )
+    ]
+    original_ids = [id(projection.weight) for projection in projections]
+    lm = FastLM(model, model.config, fuse_gate_up=False)
+    assert all(layer["gu"] is None for layer in lm.layers)
+    assert original_ids == [id(projection.weight) for projection in projections]
+
+
+def test_separate_biases_are_preserved_when_gate_up_fuses() -> None:
+    models = [make_model(), make_model()]
+    for model in models:
+        model.model.layers[0].mlp.gate_proj.bias = mx.full(
+            (128,), 0.25, dtype=mx.float16
+        )
+    lm = FastLM(models[0], models[0].config)
+    assert lm.layers[0]["gu"] is not None
+    h = mx.random.normal((1, 3, 64)).astype(mx.float16)
+    cos, sin = compute_rope(mx.arange(3), 16, 1_000_000)
+    assert_same(
+        lm.prefill(h, cos, sin, "causal", KVCache(2)),
+        models[1].model(h, cos, sin, "causal"),
+    )
+
+
+def test_unvalidated_float32_gate_up_group_falls_back() -> None:
+    model = make_model()
+    mlp = model.model.layers[0].mlp
+    mlp.gate_proj.weight = mlp.gate_proj.weight.astype(mx.float32)
+    mlp.up_proj.weight = mlp.up_proj.weight.astype(mx.float32)
+    original_ids = (id(mlp.gate_proj.weight), id(mlp.up_proj.weight))
+    lm = FastLM(model, model.config)
+    assert lm.layers[0]["gu"] is None
+    assert original_ids == (id(mlp.gate_proj.weight), id(mlp.up_proj.weight))

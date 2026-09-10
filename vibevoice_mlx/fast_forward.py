@@ -62,6 +62,8 @@ def _fuse_linear(modules: tuple[nn.Module, ...]) -> dict | None:
     first = parts[0]
     if any(part["q"] != first["q"] for part in parts):
         return None
+    if not first["q"] and first["w"].dtype != mx.float16:
+        return None
     fields = {"w": "weight"}
     if first["q"]:
         if any(
@@ -92,9 +94,12 @@ def _fuse_linear(modules: tuple[nn.Module, ...]) -> dict | None:
 
 
 def _projections(
-    x: mx.array, layer: dict, names: tuple[str, ...], fused_key: str
+    x: mx.array,
+    layer: dict,
+    names: tuple[str, ...],
+    fused_key: str | None = None,
 ) -> tuple[mx.array, ...]:
-    fused = layer.get(fused_key)
+    fused = layer.get(fused_key) if fused_key is not None else None
     if fused is None:
         outputs = [_mm(x, layer[name]) for name in names]
     else:
@@ -115,9 +120,9 @@ def _projections(
 class FastLM:
     """Flat-dict LM for fast autoregressive decode.
 
-    Fusion switches are independent; incompatible projection groups stay
-    separate. Packing replaces model arrays with shared row views. Rebuild the
-    fast path after reloading or otherwise replacing model parameters.
+    Compatible gate/up projections share a packed matmul. Packing replaces
+    model arrays with shared row views. Rebuild the fast path after reloading
+    or otherwise replacing model parameters.
     """
 
     def __init__(
@@ -125,7 +130,6 @@ class FastLM:
         model: VibeVoiceModel,
         config: VibeVoiceConfig,
         *,
-        fuse_qkv: bool = True,
         fuse_gate_up: bool = True,
     ) -> None:
         self.H = config.hidden_size
@@ -141,7 +145,6 @@ class FastLM:
         self.layers = []
         for layer in model.model.layers:
             sa, ml = layer.self_attn, layer.mlp
-            qkv = _fuse_linear((sa.q_proj, sa.k_proj, sa.v_proj)) if fuse_qkv else None
             gate_up = _fuse_linear((ml.gate_proj, ml.up_proj)) if fuse_gate_up else None
             d = {
                 "iln": layer.input_layernorm.weight,
@@ -153,7 +156,6 @@ class FastLM:
                 "g": _extract_linear(ml.gate_proj),
                 "u": _extract_linear(ml.up_proj),
                 "d": _extract_linear(ml.down_proj),
-                "qkv": qkv,
                 "gu": gate_up,
             }
             self.layers.append(d)
@@ -217,7 +219,7 @@ class FastLM:
 
             hn_cat = mx.fast.rms_norm(h_cat, d["iln"], eps)
 
-            q_cat, k_cat, v_cat = _projections(hn_cat, d, ("q", "k", "v"), "qkv")
+            q_cat, k_cat, v_cat = _projections(hn_cat, d, ("q", "k", "v"))
 
             # Split for attention (different KV caches)
             q_m, q_n = q_cat[0:1], q_cat[1:2]
@@ -272,7 +274,7 @@ class FastLM:
             res = h
             hn = mx.fast.rms_norm(h, d["iln"], eps)
 
-            q, k, v = _projections(hn, d, ("q", "k", "v"), "qkv")
+            q, k, v = _projections(hn, d, ("q", "k", "v"))
 
             q = q.reshape(1, -1, NH, HD).transpose(0, 2, 1, 3)
             k = k.reshape(1, -1, NKV, HD).transpose(0, 2, 1, 3)
@@ -341,7 +343,7 @@ class FastLM:
             res = h
             hn = mx.fast.rms_norm(h, d["iln"], eps)
 
-            q, k, v = _projections(hn, d, ("q", "k", "v"), "qkv")
+            q, k, v = _projections(hn, d, ("q", "k", "v"))
 
             q = q.reshape(1, -1, NH, HD).transpose(0, 2, 1, 3)
             k = k.reshape(1, -1, NKV, HD).transpose(0, 2, 1, 3)
