@@ -52,9 +52,7 @@ def load_model(model: str, quantize_bits: int | None = None) -> tuple[object, ob
         layer.bits = effective_bits
     return SimpleNamespace(
         named_modules=lambda: [("projection", layer)]
-    ), SimpleNamespace(
-        quantization={"bits": int(source_bits)} if source_bits else None
-    )
+    ), SimpleNamespace(quantization={"bits": int(source_bits)} if source_bits else None)
 
 
 def load_audio(path: str) -> list[int]:
