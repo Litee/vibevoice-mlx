@@ -98,18 +98,23 @@ def test_chunks_preserve_hidden_cache_and_following_tokens(
         record_property("max_absolute_difference", maximum)
 
 
-def test_generation_chunks_preserve_voice_positions_and_final_hidden(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("with_voices", [False, True], ids=["tokens", "voices"])
+def test_generation_chunks_preserve_positions_cache_and_final_hidden(
+    monkeypatch: pytest.MonkeyPatch, with_voices: bool
 ) -> None:
     module = importlib.import_module("vibevoice_mlx.generate")
     with mx.stream(mx.cpu):
         model = make_model(mx.float16)
         lm = FastLM(model, model.config)
-        ids = [4, 5, 6] * 5
-        voices = {
-            pos: mx.random.normal((1, lm.H)).astype(mx.float16)
-            for pos in (0, 3, 4, 7, 8, 14)
-        }
+        ids = ([4, 5, 6] * 85) + [4, 5]
+        voices = (
+            {
+                pos: mx.random.normal((1, lm.H)).astype(mx.float16)
+                for pos in (0, 63, 64, 127, 128, 256)
+            }
+            if with_voices
+            else {}
+        )
         full_embeds = mx.stack(
             [
                 voices[pos].reshape(lm.H) if pos in voices else lm.embed_w[token]
@@ -120,7 +125,24 @@ def test_generation_chunks_preserve_voice_positions_and_final_hidden(
         expected_cache = KVCache(lm.NL)
         expected = lm.prefill(full_embeds, cos, sin, "causal", expected_cache)[:, -1:]
         actual_chunks = []
+        generation_caches = []
+        backing_capacities = []
         prefill_chunk = FastLM.prefill_chunk
+
+        class TrackingCache(KVCache):
+            def update(
+                self, layer_idx: int, k: mx.array, v: mx.array
+            ) -> tuple[mx.array, mx.array]:
+                result = super().update(layer_idx, k, v)
+                backing = self.keys[layer_idx]
+                assert backing is not None
+                backing_capacities.append(backing.shape[2])
+                return result
+
+        def make_cache(num_layers: int, growth_step: int = 256) -> KVCache:
+            cache = TrackingCache(num_layers, growth_step)
+            generation_caches.append(cache)
+            return cache
 
         def checked_chunk(
             self: FastLM, embeds: mx.array, cos: mx.array, sin: mx.array, cache: KVCache
@@ -128,21 +150,36 @@ def test_generation_chunks_preserve_voice_positions_and_final_hidden(
             actual_chunks.append(embeds)
             return prefill_chunk(self, embeds, cos, sin, cache)
 
-        def stop_at_selection(self: FastLM, hidden: mx.array, **kwargs: object) -> int:
-            assert mx.allclose(hidden, expected, atol=4e-3, rtol=4e-3).item()
-            return model.config.eos_id
+        selections = 0
 
-        monkeypatch.setattr(module, "_LM_PREFILL_CHUNK_TOKENS", 4)
+        def stop_at_selection(self: FastLM, hidden: mx.array, **kwargs: object) -> int:
+            nonlocal selections
+            if selections == 0:
+                assert mx.allclose(hidden, expected, atol=4e-3, rtol=4e-3).item()
+                token = 4
+            else:
+                token = model.config.eos_id
+            selections += 1
+            return token
+
+        monkeypatch.setattr(module, "_LM_PREFILL_CHUNK_TOKENS", 64)
+        monkeypatch.setattr(module, "KVCache", make_cache)
         monkeypatch.setattr(FastLM, "prefill_chunk", checked_chunk)
         monkeypatch.setattr(FastLM, "select_token", stop_at_selection)
         audio, metrics = generate(
             model,
             ids,
             GenerationOptions(cfg_scale=1, max_speech_tokens=1),
-            voice_embeds=voices,
+            voice_embeds=voices or None,
         )
-        assert [chunk.shape[1] for chunk in actual_chunks] == [4, 4, 4, 3]
+        assert [chunk.shape[1] for chunk in actual_chunks] == [64, 64, 64, 64, 1]
         assert mx.array_equal(mx.concatenate(actual_chunks, axis=1), full_embeds).item()
         assert audio.size == 0
         assert metrics.num_text_tokens == len(ids)
         assert metrics.num_speech_tokens == 0
+        assert len(generation_caches) == 1
+        generation_cache = generation_caches[0]
+        assert generation_cache.growth_step == 256
+        prefill_updates = len(actual_chunks) * lm.NL
+        assert set(backing_capacities[:prefill_updates]) == {len(ids)}
+        assert set(backing_capacities[prefill_updates:]) == {512}
