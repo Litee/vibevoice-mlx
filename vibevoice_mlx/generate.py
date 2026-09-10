@@ -461,6 +461,8 @@ def generate(
     t0 = time.perf_counter()
     n_prefill = len(input_ids)
     cache = KVCache(NL)
+    decode_growth_step = cache.growth_step
+    cache.growth_step = max(n_prefill, decode_growth_step)
     for start in range(0, n_prefill, _LM_PREFILL_CHUNK_TOKENS):
         end = min(start + _LM_PREFILL_CHUNK_TOKENS, n_prefill)
         if voice_embeds:
@@ -496,6 +498,7 @@ def generate(
         # Materialize before the next chunk so its graph cannot retain activations.
         mx.eval(hidden, *cache.keys, *cache.values)
         hidden = hidden[:, -1:, :]
+    cache.growth_step = decode_growth_step
 
     metrics.record("prefill", (time.perf_counter() - t0) * 1000)
     metrics.num_text_tokens = n_prefill
