@@ -145,7 +145,7 @@ def test_trial_records_runtime_import_model_and_memory_provenance(
     )
     assert first["metrics"]["mlx_peak_generation_bytes"] == 1_000_000_000
     assert first["metrics"]["process_lifetime_peak_rss_bytes"] > 0
-    assert first["configuration_source"] == "executed_worker_state"
+    assert first["configuration_source"] == "worker_report"
     assert first["effective"] == {
         "quantization": "fp16",
         "semantic_backend": "mlx",
@@ -565,6 +565,7 @@ def test_legacy_worker_configuration_is_observed_and_mismatches_fail_closed(
         updates = {**updates, "voice_arg": str(voice)}
     plan.update(seeds=[1], repeats=1, **updates)
     worker = Path(plan["A"]) / "bench_compare.py"
+    shutil.copyfile(Path(__file__).with_name("legacy_benchmark_worker.py"), worker)
     worker.write_text(
         worker.read_text().replace(old, new) if old else worker.read_text()
     )
@@ -643,6 +644,7 @@ def test_unprovable_legacy_model_configuration_fails_closed(
     runner, plan, output, _ = paired
     plan.update(seeds=[1], repeats=1)
     worker = Path(plan["A"]) / "bench_compare.py"
+    shutil.copyfile(Path(__file__).with_name("legacy_benchmark_worker.py"), worker)
     worker.write_text(
         worker.read_text().replace(
             'sem_mode = args["sem_mode"]', mutation + '\nsem_mode = args["sem_mode"]'
