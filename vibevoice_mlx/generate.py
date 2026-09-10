@@ -53,7 +53,7 @@ class GenerationOptions:
     silence_detection: bool = False  # Boost speech_end logit on sustained silence
     trim_trailing_silence: bool | None = None  # Post-gen trim (None = follow silence_detection)
     silence_threshold: float = 0.05  # RMS threshold for silence detection
-    silence_min_duration_ms: int = 1500  # Forward scan: min silence gap to cut
+    silence_min_duration_ms: int = 1500  # Retained for compatibility
     silence_pad_ms: int = 300      # Padding after detected speech end
     seed: int | None = 42
 
@@ -779,7 +779,6 @@ def generate(
             audio_out = _trim_trailing_silence(
                 audio_out,
                 threshold=opts.silence_threshold,
-                long_silence_ms=opts.silence_min_duration_ms,
                 pad_ms=opts.silence_pad_ms,
             )
         metrics.record("vae_final", (time.perf_counter() - t0) * 1000)
@@ -795,54 +794,17 @@ def generate(
     return audio_out, metrics
 
 
-def _trim_trailing_silence(audio: np.ndarray, sr: int = 24000,
-                           threshold: float = 0.05,
-                           long_silence_ms: int = 1500,
-                           pad_ms: int = 300) -> np.ndarray:
-    """Trim audio after speech ends.
-
-    Two-pass approach:
-    1. Forward scan: if a long silence gap (>= long_silence_ms) follows
-       speech, cut there — this catches model repetition after a pause.
-    2. Backward scan: trim trailing silence/noise from the end.
-    """
+def _trim_trailing_silence(
+    audio: np.ndarray, sr: int = 24000, threshold: float = 0.05, pad_ms: int = 300
+) -> np.ndarray:
+    """Trim terminal silence while retaining speech after internal pauses."""
     window = int(sr * 0.05)  # 50ms windows
     pad = int(sr * pad_ms / 1000)
-    long_silent_windows = max(1, int(long_silence_ms / 50))
-
-    n_windows = len(audio) // window
-    if n_windows == 0:
-        return audio
-
-    rms = np.array([
-        np.sqrt(np.mean(audio[i * window:(i + 1) * window] ** 2))
-        for i in range(n_windows)
-    ])
-
-    # Forward: find first long silence gap after speech starts
-    found_speech = False
-    silent_count = 0
-    for i in range(n_windows):
-        if rms[i] >= threshold:
-            found_speech = True
-            silent_count = 0
-        elif found_speech:
-            silent_count += 1
-            if silent_count >= long_silent_windows:
-                cut = (i - silent_count + 1) * window + pad
-                audio = audio[:min(cut, len(audio))]
-                break
-
-    # Backward: trim trailing silence/noise
-    n_windows = len(audio) // window
-    if n_windows > 2:
-        rms = np.array([
-            np.sqrt(np.mean(audio[i * window:(i + 1) * window] ** 2))
-            for i in range(n_windows)
-        ])
-        for i in range(n_windows - 1, 2, -1):
-            if rms[i] >= threshold and rms[i - 1] >= threshold and rms[i - 2] >= threshold:
-                end = min((i + 1) * window + pad, len(audio))
-                return audio[:end]
+    n_windows = (len(audio) + window - 1) // window
+    for i in range(n_windows - 1, -1, -1):
+        segment = audio[i * window : (i + 1) * window]
+        if np.sqrt(np.mean(segment**2)) >= threshold:
+            end = min((i + 1) * window + pad, len(audio))
+            return audio[:end]
 
     return audio
