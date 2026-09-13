@@ -4,6 +4,42 @@ MLX inference for [Microsoft VibeVoice](https://github.com/microsoft/VibeVoice) 
 
 Zero-shot voice cloning TTS: synthesize speech from text, optionally cloning one or more reference voices. Pure MLX — no PyTorch dependency at inference time.
 
+## What this fork adds
+
+This fork builds on
+[gafiatulin/vibevoice-mlx](https://github.com/gafiatulin/vibevoice-mlx), the MLX
+port of Microsoft VibeVoice. Its changes focus on inference correctness,
+long-form memory use, and reliable measurement.
+
+| Area | Changes and practical benefit |
+|------|-------------------------------|
+| Generation correctness | Correct causal audio history, guidance-state handling, diffusion scheduling, and speech-token constraints bring inference closer to the reference implementation and address corrupted feedback and premature stopping. |
+| Less work per generated frame | Selective control-token logits, block-grown KV caches, batched guidance forwards, and prepared diffusion conditioning reduce repeated projection, allocation, and copying work. |
+| Lower startup and long-form memory | Layerwise runtime quantization avoids retaining the full unquantized backbone; chunked prompt processing bounds intermediate activations; long outputs without semantic feedback use bounded final VAE decoding. |
+| Efficient Apple Silicon execution | Attention preserves the activation dtype, MLX semantic feedback stays on device, and corrected CoreML caching supports optional CPU/GPU or CPU/Neural Engine execution. |
+| More reliable inputs and loading | Speaker labels are validated against supplied voices, reference audio and saved voices are checked, and model loading honors quantization metadata, shard indexes, and bundled tokenizer assets. |
+| Observable generation and benchmarking | Generation reports why it stopped. Benchmarks distinguish fixed-duration throughput from natural completion, verify the effective configuration, and support serial paired comparisons. |
+
+Selected historical paired benchmarks on the INT8 7B model illustrate several
+improvements. They used different code baselines and semantic backends; the
+linked PRs record each configuration and its limitations.
+
+| Improvement | Measured effect |
+|-------------|-----------------|
+| [Four-token logits](https://github.com/Litee/vibevoice-mlx/pull/20) | One five-minute ANE-semantic pair improved generation from 331.36 to 290.90 seconds and reduced peak MLX allocation from 14.54 to 12.76 GiB, with byte-identical audio. |
+| [Batched guidance](https://github.com/Litee/vibevoice-mlx/pull/45) | One five-minute MLX-semantic pair improved generation from 361.42 to 321.99 seconds with byte-identical audio; three shorter ODE pairs also improved. |
+| [Prepared diffusion conditioning](https://github.com/Litee/vibevoice-mlx/pull/52) | Three fixed-trace, MLX-semantic 30-second pairs reduced generation time by 13.86–14.44%. |
+| [Layerwise INT8 loading](https://github.com/Litee/vibevoice-mlx/pull/57) | Fresh-process peak MLX allocation fell from 15.12 to 10.17 GiB during startup, with identical fingerprints of the model parameter tree. |
+| [Bounded final VAE decode](https://github.com/Litee/vibevoice-mlx/pull/60) | A no-semantic 15-minute stress test reduced peak MLX allocation from 40.55 to 13.43 GiB. This path is not used by the default semantic mode. |
+| [Chunked LM prefill](https://github.com/Litee/vibevoice-mlx/pull/67) | Peak MLX allocation fell by 155.4 MiB for a 7,575-token prompt, with 0.51% slower prefill. |
+
+These measurements compare individual changes on their original test workloads;
+single-pair timing results are observations rather than stable speedup estimates,
+and their percentages are not additive. Performance depends on the model,
+precision, semantic backend, prompt length, and output duration. Some correctness
+fixes change floating-point results or generation trajectories, so identical
+seeds do not guarantee identical audio across versions.
+
 ## Quick start
 
 ```bash
@@ -157,7 +193,7 @@ pauses must be preserved.
 
 ## Optimizations
 
-- **DPM-Solver++ 2M**: Second-order multistep solver — 10 DPM steps > 100 DDPM steps quality
+- **DPM-Solver++ 2M**: Second-order multistep solver with 10 steps by default
 - **Streaming VAE decoder**: Causal conv caches for chunk-by-chunk decoding
 - **Streaming semantic encoder**: 34-buffer causal CNN for real-time feedback
 - **CoreML semantic encoder**: Explicit recurrent caches with CPU/GPU or opt-in CPU/Neural Engine execution
@@ -165,7 +201,7 @@ pauses must be preserved.
 - **Bounded long-form memory**: Chunked LM prefill and final VAE decode avoid retaining full-sequence intermediates
 - **Selective logits**: Projects only the control-token logits used during speech generation
 - **MLX-native RNG**: Seeded, on-device diffusion noise sampling
-- **bf16→fp16 conversion**: 2x faster inference on Apple Silicon vs bfloat16
+- **bf16→fp16 conversion**: Converts bfloat16 weights to float16 for MLX execution
 
 ## Project structure
 
