@@ -111,8 +111,10 @@ def test_cli_alternates_pairs_and_checks_memory_before_each_serial_worker(
         ("A", 22),
     ]
     manifest = json.loads((output / "trials.json").read_text())
+    assert manifest["schema_version"] == 2
     assert [trial["status"] for trial in manifest["trials"]] == ["ok"] * 8
     summary = json.loads((output / "summary.json").read_text())
+    assert summary["schema_version"] == 2
     assert summary["complete_pairs"] == 4
     assert summary["successful_trials"] == 8
     saved = "".join(path.read_text() for path in output.iterdir())
@@ -145,6 +147,7 @@ def test_trial_records_runtime_import_model_and_memory_provenance(
     )
     assert first["metrics"]["mlx_peak_generation_bytes"] == 1_000_000_000
     assert first["metrics"]["process_lifetime_peak_rss_bytes"] > 0
+    assert first["metrics"]["stop_reason"] == "speech_end"
     assert first["configuration_source"] == "worker_report"
     assert first["effective"] == {
         "quantization": "fp16",
@@ -313,6 +316,7 @@ def test_comparison_uses_matched_trials_and_labels_first_generation_scope(
             "audio_s": 2,
             "rtf": 2 / seconds,
             "speech_tokens": 2,
+            "stop_reason": "speech_end",
             "peak_mem_gb": 1,
             "effective": {
                 "quantization": "fp16",
@@ -329,6 +333,9 @@ def test_comparison_uses_matched_trials_and_labels_first_generation_scope(
     assert runner.main(["--plan", str(source), "--output", str(output)]) == 0
     summary = json.loads((output / "summary.json").read_text())
     assert summary["median_paired_B_over_A_gen_s"] == 0.5
+    assert summary["successful_pairs"] == 2
+    assert summary["workload_mismatch_pairs"] == 0
+    assert summary["unknown_workload_pairs"] == 0
     assert summary["measurement_scope"]["warmup_calls"] == 0
     assert (
         summary["measurement_scope"]["generation_call"]
@@ -337,6 +344,112 @@ def test_comparison_uses_matched_trials_and_labels_first_generation_scope(
     assert "excludes model loading" in summary["measurement_scope"]["gen_s"]
     manifest = json.loads((output / "trials.json").read_text())
     assert manifest["measurement_scope"] == summary["measurement_scope"]
+
+
+@pytest.mark.parametrize(
+    ("a_stop", "a_tokens", "a_seconds", "b_stop", "b_tokens", "b_seconds"),
+    [
+        ("max_speech_tokens", 300, 100, "max_speech_tokens", 30, 10),
+        ("eos", 30, 10, "max_speech_tokens", 30, 10),
+        ("speech_end", 30, 10, "speech_end", 31, 10),
+    ],
+)
+def test_comparison_excludes_mismatched_generation_workloads(
+    paired: tuple,
+    a_stop: str,
+    a_tokens: int,
+    a_seconds: float,
+    b_stop: str,
+    b_tokens: int,
+    b_seconds: float,
+) -> None:
+    runner, _, _, _ = paired
+    effective = {
+        "quantization": "fp16",
+        "semantic_backend": "mlx",
+        "voice_reference": "none",
+    }
+    trials = [
+        {
+            "side": "A",
+            "status": "ok",
+            "effective": effective,
+            "metrics": {
+                "gen_s": a_seconds,
+                "audio_s": a_tokens,
+                "speech_tokens": a_tokens,
+                "stop_reason": a_stop,
+            },
+        },
+        {
+            "side": "B",
+            "status": "ok",
+            "effective": effective,
+            "metrics": {
+                "gen_s": b_seconds,
+                "audio_s": b_tokens,
+                "speech_tokens": b_tokens,
+                "stop_reason": b_stop,
+            },
+        },
+    ]
+
+    summary = runner.summarize(trials)
+
+    assert summary["complete_pairs"] == 0
+    assert summary["workload_mismatch_pairs"] == 1
+    assert summary["median_paired_B_over_A_gen_s"] is None
+
+
+def test_comparison_excludes_legacy_pairs_with_unknown_completion(
+    paired: tuple,
+) -> None:
+    runner, _, _, _ = paired
+    effective = {
+        "quantization": "fp16",
+        "semantic_backend": "mlx",
+        "voice_reference": "none",
+    }
+    metrics = {"gen_s": 1, "audio_s": 2, "speech_tokens": 2}
+    trials = [
+        {"side": "A", "status": "ok", "effective": effective, "metrics": metrics},
+        {
+            "side": "B",
+            "status": "ok",
+            "effective": effective,
+            "metrics": {**metrics, "stop_reason": "speech_end"},
+        },
+    ]
+
+    summary = runner.summarize(trials)
+
+    assert summary["complete_pairs"] == 0
+    assert summary["unknown_workload_pairs"] == 1
+    assert summary["median_paired_B_over_A_gen_s"] is None
+
+
+def test_legacy_worker_without_stop_reason_is_retained_but_not_compared(
+    paired: tuple, tmp_path: Path
+) -> None:
+    runner, plan, output, _ = paired
+    plan.update(seeds=[1], repeats=1)
+    shutil.copyfile(
+        Path(__file__).with_name("legacy_benchmark_worker.py"),
+        Path(plan["A"]) / "bench_compare.py",
+    )
+    source = tmp_path / "plan.json"
+    source.write_text(json.dumps(plan))
+
+    assert runner.main(["--plan", str(source), "--output", str(output)]) == 0
+
+    trials = json.loads((output / "trials.json").read_text())["trials"]
+    assert trials[0]["status"] == "ok"
+    assert trials[0]["metrics"]["stop_reason"] is None
+    assert trials[1]["metrics"]["stop_reason"] == "speech_end"
+    summary = json.loads((output / "summary.json").read_text())
+    assert summary["successful_pairs"] == 1
+    assert summary["unknown_workload_pairs"] == 1
+    assert summary["complete_pairs"] == 0
 
 
 def test_actual_imported_files_are_identified_by_content_not_local_paths(
@@ -586,7 +699,14 @@ def test_unknown_worker_configuration_is_excluded_without_leaking_strings(
 ) -> None:
     runner, plan, output, _ = paired
     plan.update(seeds=[1], repeats=1)
-    result = {"gen_s": 1, "audio_s": 2, "rtf": 2, "speech_tokens": 2, "peak_mem_gb": 1}
+    result = {
+        "gen_s": 1,
+        "audio_s": 2,
+        "rtf": 2,
+        "speech_tokens": 2,
+        "peak_mem_gb": 1,
+        "stop_reason": "/private/secret",
+    }
     if effective is not None:
         result["effective"] = effective
     script = "print(" + repr("BENCH_RESULT:" + json.dumps(result)) + ")"

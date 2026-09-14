@@ -28,12 +28,15 @@ from pathlib import Path
 from typing import Any
 
 MIN_AVAILABLE_BYTES = 12 * 1024**3
+RESULT_SCHEMA_VERSION = 2
 MEASUREMENT_SCOPE = {
     "generation_call": "first call in a fresh worker process",
     "warmup_calls": 0,
     "gen_s": "wall time of generate only; excludes model loading, semantic encoder setup, tokenization and voice preparation; includes lazy fast-path initialization",
     "cache_state": "fresh process; OS filesystem and external caches are not cleared",
+    "paired_timing": "included only when both workers report the same stop reason and speech-token count",
 }
+STOP_REASONS = {"eos", "speech_end", "max_speech_tokens", "max_generation_tokens"}
 WORKER = """
 import hashlib, importlib.metadata, json, platform, re, resource, runpy, sys
 from pathlib import Path
@@ -302,6 +305,8 @@ def worker_result(
             or metrics["speech_tokens"] <= 0
         ):
             raise ValueError("Empty or invalid generation")
+        stop_reason = value.get("stop_reason")
+        metrics["stop_reason"] = stop_reason if stop_reason in STOP_REASONS else None
         effective = safe_configuration(value.get("effective", observed))
         reported_request = safe_configuration(value.get("requested", requested))
         record.update(
@@ -331,6 +336,9 @@ def worker_result(
 
 def summarize(trials: list[dict[str, Any]]) -> dict[str, Any]:
     ratios = []
+    successful_pairs = 0
+    workload_mismatch_pairs = 0
+    unknown_workload_pairs = 0
     for start in range(0, len(trials), 2):
         pair = trials[start : start + 2]
         if (
@@ -339,8 +347,19 @@ def summarize(trials: list[dict[str, Any]]) -> dict[str, Any]:
             and pair[0]["effective"] == pair[1]["effective"]
         ):
             sides = {trial["side"]: trial["metrics"] for trial in pair}
-            ratios.append(sides["B"]["gen_s"] / sides["A"]["gen_s"])
+            successful_pairs += 1
+            stop_reasons = {metrics.get("stop_reason") for metrics in sides.values()}
+            if None in stop_reasons:
+                unknown_workload_pairs += 1
+            elif (
+                len(stop_reasons) != 1
+                or sides["A"]["speech_tokens"] != sides["B"]["speech_tokens"]
+            ):
+                workload_mismatch_pairs += 1
+            else:
+                ratios.append(sides["B"]["gen_s"] / sides["A"]["gen_s"])
     return {
+        "schema_version": RESULT_SCHEMA_VERSION,
         "measurement_scope": MEASUREMENT_SCOPE,
         "planned_trials": len(trials),
         "successful_trials": sum(trial["status"] == "ok" for trial in trials),
@@ -349,6 +368,9 @@ def summarize(trials: list[dict[str, Any]]) -> dict[str, Any]:
             for status in sorted({trial["status"] for trial in trials})
         },
         "complete_pairs": len(ratios),
+        "successful_pairs": successful_pairs,
+        "workload_mismatch_pairs": workload_mismatch_pairs,
+        "unknown_workload_pairs": unknown_workload_pairs,
         "median_paired_B_over_A_gen_s": statistics.median(ratios) if ratios else None,
         "memory_labels": {
             "mlx_peak_generation_bytes": "MLX allocator peak since reset immediately before generate; includes live model allocations",
@@ -402,7 +424,7 @@ def run_plan(plan: dict[str, Any], output: Path, lock_fd: int) -> dict[str, Any]
                     }
                 )
     manifest = {
-        "schema_version": 1,
+        "schema_version": RESULT_SCHEMA_VERSION,
         "measurement_scope": MEASUREMENT_SCOPE,
         "memory_gate_bytes": MIN_AVAILABLE_BYTES,
         "inputs": input_provenance(plan),

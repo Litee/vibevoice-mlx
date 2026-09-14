@@ -287,3 +287,7 @@ audio checks. The benchmark rejects unavailable backends and non-finite audio.
 Model loading and audio-file writing are excluded from generation time. CoreML
 allocations are not included in MLX's memory counter, and process RSS is a
 separate metric, not an additive total.
+
+Paired timing ratios from `bench_paired.py` require matching stop reasons and
+speech-token counts. Runs with mismatched or unknown workloads remain recorded
+but are excluded from timing ratios.
