@@ -191,8 +191,9 @@ def _prepare_diffusion_conditioning(
     # Optimize only the concrete built-in head; preserve every other call path.
     if type(diff_head) is not FastDiffusionHead:
         return None
+    # MLX 0.32 rejects negative-stride NumPy views, including one-item slices.
     return diff_head.prepare_conditioning(
-        condition, mx.array(timesteps).astype(dtype), dtype=dtype,
+        condition, mx.array(np.array(timesteps, copy=True, order="C")).astype(dtype), dtype=dtype,
     )
 
 def _dpm_denoise_step(

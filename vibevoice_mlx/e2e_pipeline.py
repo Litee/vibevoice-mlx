@@ -204,6 +204,9 @@ def encode_voice_reference(
 
     # Trim to actual token count
     actual_t = min(latents.shape[1], num_vae_tokens)
+    # MLX 0.32 rejects boolean slice bounds; retain the prior 0/1 meaning.
+    if isinstance(actual_t, bool):
+        actual_t = int(actual_t)
     latents = latents[:, :actual_t, :]  # (1, T, vae_dim)
 
     # Apply scaling and bias, then batch through acoustic connector
