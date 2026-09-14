@@ -80,7 +80,10 @@ def full_padded_embeddings(
     latent = vae_encoder.encode_audio(
         mx.array(padded).reshape(1, 1, -1), model._encoder_weights
     )
-    latent = latent[:, : min(latent.shape[1], tokens), :]
+    actual_t = min(latent.shape[1], tokens)
+    if isinstance(actual_t, bool):
+        actual_t = int(actual_t)
+    latent = latent[:, :actual_t, :]
     features = (
         (latent + config.speech_bias_factor) * config.speech_scaling_factor
     ).astype(mx.float16)

@@ -32,6 +32,7 @@ linked PRs record each configuration and its limitations.
 | [Layerwise INT8 loading](https://github.com/Litee/vibevoice-mlx/pull/57) | Fresh-process peak MLX allocation fell from 15.12 to 10.17 GiB during startup, with identical fingerprints of the model parameter tree. |
 | [Bounded final VAE decode](https://github.com/Litee/vibevoice-mlx/pull/60) | A no-semantic 15-minute stress test reduced peak MLX allocation from 40.55 to 13.43 GiB. This path is not used by the default semantic mode. |
 | [Chunked LM prefill](https://github.com/Litee/vibevoice-mlx/pull/67) | Peak MLX allocation fell by 155.4 MiB for a 7,575-token prompt, with 0.51% slower prefill. |
+| [MLX 0.31.1 → 0.32.2](https://github.com/Litee/vibevoice-mlx/pull/83) | Five interleaved 7B INT8 MLX-semantic pairs, each generating 26.67 seconds, used 26.4% less generation time on the paired geometric mean; the 95% percentile-bootstrap interval was 22.3–30.6% less time. The changed audio passed human listening review. |
 
 These measurements compare individual changes on their original test workloads;
 single-pair timing results are observations rather than stable speedup estimates,
