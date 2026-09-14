@@ -245,7 +245,7 @@ benchmarks/podcast.py   Long-form backend benchmark
 ## Requirements
 
 - Python >= 3.10
-- Apple Silicon Mac (M1/M2/M3/M4)
+- Apple Silicon Mac (M1/M2/M3/M4/M5)
 - MLX >= 0.24.0
 
 ```bash
