@@ -119,7 +119,8 @@ def generate(**kwargs: Any) -> tuple[list[float], SimpleNamespace]:
         voice_positions=sorted(kwargs["voice_embeds"] or {}),
     )
     return [0.1, 0.2], SimpleNamespace(
-        summary=lambda: {"audio_seconds": 2.0}, num_speech_tokens=2
+        summary=lambda: {"audio_seconds": 2.0, "stop_reason": "speech_end"},
+        num_speech_tokens=2,
     )
 
 

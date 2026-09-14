@@ -158,6 +158,7 @@ print("BENCH_RESULT:" + json.dumps({
     "rtf": rtf,
     "peak_mem_gb": peak,
     "speech_tokens": metrics.num_speech_tokens,
+    "stop_reason": summary.get("stop_reason"),
 }))
 """)
 
