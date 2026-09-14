@@ -411,6 +411,8 @@ def load_model(
             if mlx_name is not None:
                 mapped[mlx_name] = w
         raw_weights = mapped
+        # Keep a single owner so consumed HF tensors can be freed during loading.
+        del mapped
     elif is_mlx_format:
         logger.info("  Detected MLX format")
     else:
