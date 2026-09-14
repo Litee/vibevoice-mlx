@@ -85,6 +85,11 @@ def detect_tokenizer(model: Path, config: object) -> str:
     return "test-tokenizer"
 
 
+def detect_legacy_tokenizer(model: str, config: object) -> str:
+    """Adapt the historical worker's string model argument to the current API."""
+    return detect_tokenizer(Path(model), config)
+
+
 def tokenize_text(
     text: str, tokenizer: str, config: object, ref_audio: list[str] | None = None
 ) -> VoiceCloneData | list[int]:
@@ -158,6 +163,7 @@ pipeline._load_and_resample = load_audio
 pipeline.encode_voice_reference = encode_voice
 pipeline.save_voice = save_voice
 pipeline.load_voice = load_voice
+pipeline._detect_tokenizer = detect_legacy_tokenizer
 pipeline.tokenize_text = tokenize_text
 pipeline._try_mlx_semantic = semantic
 pipeline._try_coreml_semantic = coreml
