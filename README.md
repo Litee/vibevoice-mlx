@@ -88,6 +88,19 @@ budget truncates generation.
 
 ## Performance
 
+The synthesis CLI and `benchmarks/podcast.py` release the model's acoustic
+reference encoder weights after preparing all voices, before semantic setup
+and generation. The acoustic connector, audio decoder, and semantic feedback
+remain available; library voice encoding keeps its existing caching behavior.
+Five fresh-process 7B INT8 pairs reduced active MLX memory before semantic setup
+and generation peak by 655.6 MiB in every pair, with byte-identical output.
+Generation time was 1.4–8.3% lower; the geometric-mean reduction was 4.8%, with
+an exploratory paired log-time 95% interval of 0.8–8.6%. With only five pairs,
+the smallest possible two-sided sign-test p-value is 0.0625, so treat the timing
+result as evidence from this workload rather than a general speedup guarantee.
+Process-lifetime peak RSS did not improve consistently because earlier loading
+and voice-encoding high-water marks can dominate it.
+
 These historical, hardware-specific results were measured subprocess-isolated
 on Apple Silicon (M4 Max, 64 GB) with voice cloning and about 30 seconds of
 audio. Current `main` contains later performance and correctness changes, so use

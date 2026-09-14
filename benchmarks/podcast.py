@@ -16,6 +16,7 @@ import numpy as np
 import soundfile as sf
 
 from vibevoice_mlx.e2e_pipeline import (
+    _release_acoustic_encoder,
     _try_coreml_semantic,
     _try_mlx_semantic,
     encode_voice_reference,
@@ -81,6 +82,7 @@ def main() -> None:
         )
         for i, pos in enumerate(speaker.speech_embed_positions):
             voice_embeds[pos] = mx.array(embeds[i : i + 1]).astype(mx.float16)
+    _release_acoustic_encoder(model)
     semantic = (
         _try_mlx_semantic(model, config, args.model)
         if args.backend == "mlx"
