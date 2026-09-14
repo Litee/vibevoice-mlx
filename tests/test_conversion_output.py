@@ -94,6 +94,8 @@ def test_tokenizer_failure_preserves_existing_checkpoint(tmp_path: Path) -> None
         save_source(first, 0.0)
         save_source(second, 0.5)
         convert.convert_model(str(first), output, tokenizer_id=str(first))
+        (output / "special_tokens_map.json").write_text('{"unk_token": "<old>"}')
+        (output / "vocab.json").write_text('{"<old>": 0}')
         before = {p.name: p.read_bytes() for p in output.iterdir()}
         (second / "tokenizer.json").write_text("{broken")
 
@@ -102,6 +104,65 @@ def test_tokenizer_failure_preserves_existing_checkpoint(tmp_path: Path) -> None
 
         assert {p.name: p.read_bytes() for p in output.iterdir()} == before
         np.testing.assert_array_equal(decoded_audio(output), 0.25)
+
+
+def test_repeated_conversion_removes_obsolete_tokenizer_assets(tmp_path: Path) -> None:
+    with mx.stream(mx.cpu):
+        source, output = tmp_path / "source", tmp_path / "output"
+        save_source(source, 0.0)
+        convert.convert_model(str(source), output, tokenizer_id=str(source))
+        # Transformers 5 no longer writes these legacy files. A map left by an
+        # older conversion still overrides the newly serialized special tokens.
+        stale_assets = {
+            "special_tokens_map.json": '{"unk_token": "<old>"}',
+            "added_tokens.json": '{"<old>": 1}',
+            "vocab.json": '{"<old>": 0}',
+            "merges.txt": "#version: 0.2\no l\n",
+        }
+        for name, content in stale_assets.items():
+            (output / name).write_text(content)
+        notes = {
+            "tokenizer-notes.json": "keep tokenizer notes",
+            "special_tokens_map.json.backup": "keep backup",
+            "vocab.txt": "keep unrelated vocabulary",
+        }
+        for name, content in notes.items():
+            (output / name).write_text(content)
+
+        convert.convert_model(str(source), output, tokenizer_id=str(source))
+
+        restored = PreTrainedTokenizerFast.from_pretrained(str(output))
+        assert restored.unk_token == "<unk>"
+        assert len(restored) == 1
+        for name in stale_assets:
+            # Older supported Transformers releases still serialize some assets.
+            assert (output / name).exists() == (source / name).exists()
+        for name, content in notes.items():
+            assert (output / name).read_text() == content
+
+
+@pytest.mark.parametrize(
+    "filename",
+    ["special_tokens_map.json", "added_tokens.json", "vocab.json", "merges.txt"],
+)
+def test_conversion_keeps_legacy_assets_written_by_current_serializer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, filename: str
+) -> None:
+    with mx.stream(mx.cpu):
+        source, output = tmp_path / "source", tmp_path / "output"
+        save_source(source, 0.0)
+        output.mkdir()
+        (output / filename).write_text("previous serialized asset")
+        copy_tokenizer = convert._copy_tokenizer
+
+        def serialize_legacy_asset(directory: Path, tokenizer_id: str) -> None:
+            copy_tokenizer(directory, tokenizer_id)
+            (directory / filename).write_text("current serialized asset")
+
+        monkeypatch.setattr(convert, "_copy_tokenizer", serialize_legacy_asset)
+        convert.convert_model(str(source), output, tokenizer_id=str(source))
+
+        assert (output / filename).read_text() == "current serialized asset"
 
 
 @pytest.mark.parametrize("filename", ["voice.safetensors", "model-backup.safetensors"])
