@@ -146,6 +146,7 @@ def run_podcast(
     (tmp_path / "text.txt").write_text("Speaker 0: Hello.\nSpeaker 1: Hi.")
     for name in ("first.wav", "second.wav"):
         (tmp_path / name).write_bytes(b"reference fixture")
+    (tmp_path / "model").mkdir()
 
     def run(extra: list[str]) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -153,7 +154,7 @@ def run_podcast(
                 sys.executable,
                 str(SCRIPT),
                 "--model",
-                "unused",
+                str(tmp_path / "model"),
                 "--text-file",
                 str(tmp_path / "text.txt"),
                 "--ref-audio",
@@ -200,6 +201,48 @@ def test_saved_voice_embeddings_reach_both_generation_calls_without_reencoding(
     assert len(generation_events) == 2
     expected = {"5": [1.0, 2.0], "6": [3.0, 4.0], "9": [5.0, 6.0]}
     assert all(event["voice_embeds"] == expected for event in generation_events)
+
+
+@pytest.mark.parametrize("remote", [False, True])
+@pytest.mark.parametrize(
+    "assets,vocab_size,expected",
+    [
+        (["tokenizer_config.json", "tokenizer.json"], 152064, "bundle"),
+        (["tokenizer_config.json", "vocab.json", "merges.txt"], 151936, "bundle"),
+        ([], 151936, "Qwen/Qwen2.5-1.5B"),
+        (["tokenizer_config.json"], 152064, "Qwen/Qwen2.5-7B"),
+    ],
+)
+def test_model_bundle_selects_tokenizer_before_generation(
+    run_podcast: Callable[[list[str]], subprocess.CompletedProcess[str]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    assets: list[str],
+    vocab_size: int,
+    expected: str,
+    remote: bool,
+) -> None:
+    model = tmp_path / "model"
+    for name in assets:
+        (model / name).write_text("{}")
+    monkeypatch.setenv("PODCAST_VOCAB_SIZE", str(vocab_size))
+    monkeypatch.setenv("PODCAST_RESOLVED_MODEL", str(model))
+
+    result = run_podcast(["--model", "fixture/remote-model"] if remote else [])
+
+    assert result.returncode == 0, result.stderr
+    events = [
+        json.loads(line.removeprefix("PODCAST_EVENT:"))
+        for line in result.stdout.splitlines()
+        if line.startswith("PODCAST_EVENT:")
+    ]
+    assert [
+        event["tokenizer"] for event in events if event["name"] == "tokenize_text"
+    ] == [str(model) if expected == "bundle" else expected]
+    assert [event["model"] for event in events if event["name"] == "load_model"] == [
+        str(model)
+    ]
+    assert sum(event["name"] == "snapshot_download" for event in events) == int(remote)
 
 
 @pytest.mark.parametrize(

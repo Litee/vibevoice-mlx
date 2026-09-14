@@ -5,9 +5,11 @@ import importlib
 import json
 import os
 from dataclasses import asdict
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import huggingface_hub
 import mlx.core as mx
 import numpy as np
 
@@ -22,13 +24,17 @@ def event(name: str, **values: Any) -> None:
 
 
 def load_model(*args: Any, **kwargs: Any) -> tuple[object, object]:
-    event("load_model")
+    event("load_model", model=args[0])
     model = SimpleNamespace()
     atexit.register(
         lambda: event("restored", value=model._fast_lm.select_token is original_select)
     )
     return model, SimpleNamespace(
-        speech_start_id=1, speech_end_id=2, speech_diffusion_id=3, eos_id=4
+        speech_start_id=1,
+        speech_end_id=2,
+        speech_diffusion_id=3,
+        eos_id=4,
+        vocab_size=int(os.environ.get("PODCAST_VOCAB_SIZE", "151936")),
     )
 
 
@@ -38,6 +44,7 @@ def original_select(hidden: int, **kwargs: Any) -> int:
 
 
 def tokenize_text(*args: Any, **kwargs: Any) -> SimpleNamespace:
+    event("tokenize_text", tokenizer=args[1])
     if os.environ.get("PODCAST_CACHED_VOICES"):
         return SimpleNamespace(
             input_ids=[1],
@@ -57,6 +64,14 @@ def tokenize_text(*args: Any, **kwargs: Any) -> SimpleNamespace:
             ],
         )
     return SimpleNamespace(input_ids=[1], speakers=[])
+
+
+def snapshot_download(model_id: str) -> str:
+    assert model_id == "fixture/remote-model"
+    resolved = os.environ["PODCAST_RESOLVED_MODEL"]
+    assert Path(resolved).is_dir()
+    event("snapshot_download", model=model_id)
+    return resolved
 
 
 def encode_voice_reference(*args: Any, **kwargs: Any) -> np.ndarray:
@@ -111,6 +126,7 @@ def generate(
 
 
 weights.load_model = load_model
+huggingface_hub.snapshot_download = snapshot_download
 pipeline.tokenize_text = tokenize_text
 pipeline.encode_voice_reference = encode_voice_reference
 pipeline._try_mlx_semantic = semantic

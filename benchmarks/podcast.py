@@ -28,7 +28,7 @@ from vibevoice_mlx.generate import (
     _validate_diffusion_steps,
     generate,
 )
-from vibevoice_mlx.load_weights import load_model
+from vibevoice_mlx.load_weights import detect_tokenizer, load_model, resolve_model_path
 
 
 def main() -> None:
@@ -72,21 +72,24 @@ def main() -> None:
     )
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     start_setup = time.perf_counter()
-    model, config = load_model(args.model, quantize_bits=8)
+    model_path = resolve_model_path(args.model)
+    model_id = str(model_path)
+    model, config = load_model(model_id, quantize_bits=8)
     text = args.text_file.read_text()
-    prompt = tokenize_text(text, args.model, config, ref_audio=args.ref_audio)
+    tokenizer_name = detect_tokenizer(model_path, config)
+    prompt = tokenize_text(text, tokenizer_name, config, ref_audio=args.ref_audio)
     voice_embeds = {}
     for speaker in prompt.speakers:
         embeds = speaker.cached_embeds
         if embeds is None:
             embeds = encode_voice_reference(
-                speaker.ref_audio_np, speaker.num_vae_tokens, model, config, args.model
+                speaker.ref_audio_np, speaker.num_vae_tokens, model, config, model_id
             )
         for i, pos in enumerate(speaker.speech_embed_positions):
             voice_embeds[pos] = mx.array(embeds[i : i + 1]).astype(mx.float16)
     _release_acoustic_encoder(model)
     semantic = (
-        _try_mlx_semantic(model, config, args.model)
+        _try_mlx_semantic(model, config, model_id)
         if args.backend == "mlx"
         else _try_coreml_semantic(model, config, use_ane=args.backend == "ane")
     )

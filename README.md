@@ -272,6 +272,9 @@ uv run --frozen --extra coreml python benchmarks/podcast.py \
 
 Each benchmark voice reference may be raw audio or a saved `.safetensors` voice.
 
+The podcast benchmark resolves tokenizer assets from the model bundle, with a
+vocabulary-based fallback for incomplete or legacy bundles.
+
 Fixed-duration mode uses INT8 LLM weights, 10 ODE steps, guidance 1.3, seed 42,
 a separate eight-token warm-up, and the requested speech-token budget. A budget
 of 2,250 tokens is exactly 300 seconds, so the supplied text must be longer than
