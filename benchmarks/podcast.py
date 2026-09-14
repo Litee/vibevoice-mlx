@@ -77,9 +77,11 @@ def main() -> None:
     prompt = tokenize_text(text, args.model, config, ref_audio=args.ref_audio)
     voice_embeds = {}
     for speaker in prompt.speakers:
-        embeds = encode_voice_reference(
-            speaker.ref_audio_np, speaker.num_vae_tokens, model, config, args.model
-        )
+        embeds = speaker.cached_embeds
+        if embeds is None:
+            embeds = encode_voice_reference(
+                speaker.ref_audio_np, speaker.num_vae_tokens, model, config, args.model
+            )
         for i, pos in enumerate(speaker.speech_embed_positions):
             voice_embeds[pos] = mx.array(embeds[i : i + 1]).astype(mx.float16)
     _release_acoustic_encoder(model)

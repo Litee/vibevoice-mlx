@@ -38,7 +38,32 @@ def original_select(hidden: int, **kwargs: Any) -> int:
 
 
 def tokenize_text(*args: Any, **kwargs: Any) -> SimpleNamespace:
+    if os.environ.get("PODCAST_CACHED_VOICES"):
+        return SimpleNamespace(
+            input_ids=[1],
+            speakers=[
+                SimpleNamespace(
+                    cached_embeds=np.array([[1.0, 2.0], [3.0, 4.0]]),
+                    ref_audio_np=np.zeros(0, dtype=np.float32),
+                    num_vae_tokens=2,
+                    speech_embed_positions=[5, 6],
+                ),
+                SimpleNamespace(
+                    cached_embeds=np.array([[5.0, 6.0]]),
+                    ref_audio_np=np.zeros(0, dtype=np.float32),
+                    num_vae_tokens=1,
+                    speech_embed_positions=[9],
+                ),
+            ],
+        )
     return SimpleNamespace(input_ids=[1], speakers=[])
+
+
+def encode_voice_reference(*args: Any, **kwargs: Any) -> np.ndarray:
+    event("encode_voice_reference")
+    if os.environ.get("PODCAST_CACHED_VOICES"):
+        raise AssertionError("cached voices must bypass acoustic encoding")
+    return np.zeros((1, 2), dtype=np.float32)
 
 
 def semantic(*args: Any, **kwargs: Any) -> tuple[Any, Any]:
@@ -51,7 +76,15 @@ def generate(
     opts: generation.GenerationOptions,
     **kwargs: Any,
 ) -> tuple[np.ndarray, SimpleNamespace]:
-    event("generate", options=asdict(opts), estimated_total=kwargs["estimated_total"])
+    event(
+        "generate",
+        options=asdict(opts),
+        estimated_total=kwargs["estimated_total"],
+        voice_embeds={
+            str(position): np.array(embedding).reshape(-1).tolist()
+            for position, embedding in (kwargs["voice_embeds"] or {}).items()
+        },
+    )
     if not hasattr(model, "_fast_lm"):
         model._fast_lm = SimpleNamespace(select_token=original_select)
     selections = json.loads(os.environ.get("PODCAST_SELECTIONS", "[3,2,1,3,4]"))
@@ -79,6 +112,7 @@ def generate(
 
 weights.load_model = load_model
 pipeline.tokenize_text = tokenize_text
+pipeline.encode_voice_reference = encode_voice_reference
 pipeline._try_mlx_semantic = semantic
 pipeline._try_coreml_semantic = semantic
 generation.generate = generate

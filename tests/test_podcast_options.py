@@ -181,6 +181,27 @@ def run_podcast(
     return run
 
 
+def test_saved_voice_embeddings_reach_both_generation_calls_without_reencoding(
+    run_podcast: Callable[[list[str]], subprocess.CompletedProcess[str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PODCAST_CACHED_VOICES", "1")
+
+    result = run_podcast([])
+
+    assert result.returncode == 0, result.stderr
+    events = [
+        json.loads(line.removeprefix("PODCAST_EVENT:"))
+        for line in result.stdout.splitlines()
+        if line.startswith("PODCAST_EVENT:")
+    ]
+    assert not [event for event in events if event["name"] == "encode_voice_reference"]
+    generation_events = [event for event in events if event["name"] == "generate"]
+    assert len(generation_events) == 2
+    expected = {"5": [1.0, 2.0], "6": [3.0, 4.0], "9": [5.0, 6.0]}
+    assert all(event["voice_embeds"] == expected for event in generation_events)
+
+
 @pytest.mark.parametrize(
     "extra,expected",
     [
