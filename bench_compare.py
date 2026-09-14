@@ -213,13 +213,13 @@ def pre_encode_voice(model_path: str, ref_audio: str, save_path: str) -> str | N
     script = textwrap.dedent("""\
 import json, os, sys
 os.environ["TRANSFORMERS_VERBOSITY"] = "error"
-from vibevoice_mlx.load_weights import load_model
+from vibevoice_mlx.load_weights import load_voice_encoder
 from vibevoice_mlx.e2e_pipeline import encode_voice_reference, save_voice, SAMPLE_RATE, VOICE_CLONE_SAMPLES, SPEECH_TOK_COMPRESS_RATIO, _load_and_resample
 import math
 
 args = json.loads(sys.argv[1])
 model_path = args["model"]
-model, config = load_model(model_path, quantize_bits=None)
+model, config = load_voice_encoder(model_path)
 wav = _load_and_resample(args["ref_audio"])
 if len(wav) > VOICE_CLONE_SAMPLES:
     wav = wav[:VOICE_CLONE_SAMPLES]

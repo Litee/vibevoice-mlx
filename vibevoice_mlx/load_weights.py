@@ -4,16 +4,36 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import mlx.core as mx
 import mlx.nn as nn
 from mlx.utils import tree_flatten
 
-from .model import VibeVoiceConfig, VibeVoiceModel
+from .model import Connector, VibeVoiceConfig, VibeVoiceModel
 
 logger = logging.getLogger(__name__)
+
+
+class VoiceEncoderModel:
+    """Only the model components needed to encode reusable voice references."""
+
+    def __init__(self, config: VibeVoiceConfig):
+        self.acoustic_connector = Connector(config.vae_dim, config.hidden_size)
+        self._encoder_weights: dict[str, Any] = {}
+
+
+def _cast_bfloat16_to_float16(params: Any) -> Any:
+    """Match the model loader's execution dtype conversion."""
+    if isinstance(params, dict):
+        return {k: _cast_bfloat16_to_float16(v) for k, v in params.items()}
+    if isinstance(params, list):
+        return [_cast_bfloat16_to_float16(v) for v in params]
+    if isinstance(params, mx.array) and params.dtype == mx.bfloat16:
+        return params.astype(mx.float16)
+    return params
 
 
 def resolve_model_path(model_id_or_path: str) -> Path:
@@ -107,8 +127,11 @@ def load_config(model_path: Path) -> VibeVoiceConfig:
     )
 
 
-def _load_safetensors(model_path: Path) -> dict[str, mx.array]:
-    """Load indexed shards, or all safetensors for legacy checkpoints."""
+def _load_safetensors(
+    model_path: Path,
+    tensor_filter: Callable[[str], bool] | None = None,
+) -> dict[str, mx.array]:
+    """Load matching tensors from indexed shards or legacy checkpoints."""
     index_path = model_path / "model.safetensors.index.json"
     if index_path.exists():
         with index_path.open() as f:
@@ -128,7 +151,13 @@ def _load_safetensors(model_path: Path) -> dict[str, mx.array]:
             raise ValueError(
                 f"Invalid {index_path.name}: weight_map must map tensor names to shard filenames"
             )
-        shard_names = sorted(set(weight_map.values()))
+        shard_names = sorted(
+            {
+                filename
+                for name, filename in weight_map.items()
+                if tensor_filter is None or tensor_filter(name)
+            }
+        )
     else:
         weight_map = None
         shard_names = sorted(p.name for p in model_path.glob("*.safetensors"))
@@ -143,15 +172,19 @@ def _load_safetensors(model_path: Path) -> dict[str, mx.array]:
         shard = mx.load(str(shard_path))
         if weight_map is None:
             for name in shard:
+                if tensor_filter is not None and not tensor_filter(name):
+                    continue
                 if name in sources:
                     raise ValueError(
                         f"Duplicate tensor {name!r} in {sources[name]} and {shard_name}"
                     )
                 sources[name] = shard_name
-            weights.update(shard)
+                weights[name] = shard[name]
         else:
             for name, file in weight_map.items():
-                if file == shard_name:
+                if file == shard_name and (
+                    tensor_filter is None or tensor_filter(name)
+                ):
                     if name not in shard:
                         raise ValueError(
                             f"Indexed tensor {name!r} missing from {shard_name}"
@@ -484,19 +517,94 @@ def load_model(
 
     # Cast all weights to float16 (HF checkpoints store bfloat16 which is
     # ~2x slower than float16 for repeated small-batch matmul on Apple Silicon)
-    def _cast_to_f16(params):
-        if isinstance(params, dict):
-            return {k: _cast_to_f16(v) for k, v in params.items()}
-        if isinstance(params, list):
-            return [_cast_to_f16(v) for v in params]
-        if isinstance(params, mx.array) and params.dtype == mx.bfloat16:
-            return params.astype(mx.float16)
-        return params
-
-    model.update(_cast_to_f16(model.parameters()))
+    model.update(_cast_bfloat16_to_float16(model.parameters()))
     mx.eval(model.parameters())
     logger.info("  Model loaded successfully")
 
+    return model, config
+
+
+def load_voice_encoder(model_id: str) -> tuple[VoiceEncoderModel, VibeVoiceConfig]:
+    """Load only the acoustic encoder and connector used by encode-only mode."""
+    logger.info("Loading voice encoder from %s...", model_id)
+    model_path = resolve_model_path(model_id)
+    config = load_config(model_path)
+    voice_prefixes = (
+        "model.acoustic_tokenizer.encoder.",
+        "model.acoustic_connector.",
+        "acoustic_encoder.",
+        "acoustic_connector.",
+    )
+    voice_scalars = {
+        "model.speech_scaling_factor",
+        "model.speech_bias_factor",
+    }
+    raw_weights = _load_safetensors(
+        model_path,
+        lambda name: name.startswith(voice_prefixes) or name in voice_scalars,
+    )
+
+    is_hf_format = any(
+        k.startswith(("model.acoustic_tokenizer.encoder.", "model.acoustic_connector."))
+        for k in raw_weights
+    )
+    connector_prefix = (
+        "model.acoustic_connector." if is_hf_format else "acoustic_connector."
+    )
+    if is_hf_format:
+        for weight_name, attribute in [
+            ("model.speech_scaling_factor", "speech_scaling_factor"),
+            ("model.speech_bias_factor", "speech_bias_factor"),
+        ]:
+            if weight_name in raw_weights:
+                setattr(config, attribute, raw_weights[weight_name].item())
+
+    from .vae_encoder import load_vae_encoder_weights
+
+    has_encoder = any(
+        name.startswith(
+            ("model.acoustic_tokenizer.encoder.", "acoustic_encoder.")
+        )
+        for name in raw_weights
+    )
+    if not has_encoder:
+        raise RuntimeError(f"No acoustic encoder weights found in {model_path}")
+    encoder_weights = load_vae_encoder_weights(raw_weights)
+
+    connector_weights = {
+        name[len(connector_prefix) :]: value
+        for name, value in raw_weights.items()
+        if name.startswith(connector_prefix)
+    }
+    del raw_weights
+
+    model = VoiceEncoderModel(config)
+    expected_shapes = {
+        name: value.shape
+        for name, value in tree_flatten(model.acoustic_connector.parameters())
+    }
+    supplied_names = connector_weights.keys()
+    if extra := supplied_names - expected_shapes.keys():
+        raise ValueError(
+            f"Acoustic connector parameters not in model: {', '.join(sorted(extra))}"
+        )
+    if missing := expected_shapes.keys() - supplied_names:
+        raise ValueError(
+            f"Missing acoustic connector parameters: {', '.join(sorted(missing))}"
+        )
+    for name, value in connector_weights.items():
+        if value.shape != expected_shapes[name]:
+            raise ValueError(
+                f"Expected shape {expected_shapes[name]} but received "
+                f"shape {value.shape} for acoustic_connector.{name}"
+            )
+    model.acoustic_connector.load_weights(list(connector_weights.items()))
+    model.acoustic_connector.update(
+        _cast_bfloat16_to_float16(model.acoustic_connector.parameters())
+    )
+    model._encoder_weights = encoder_weights
+    mx.eval(model.acoustic_connector.parameters(), model._encoder_weights)
+    logger.info("  Voice encoder loaded successfully")
     return model, config
 
 

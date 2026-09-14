@@ -33,7 +33,13 @@ from .generate import (
     _validate_generation_options,
     generate,
 )
-from .load_weights import detect_tokenizer, load_model, resolve_model_path
+from .load_weights import (
+    VoiceEncoderModel,
+    detect_tokenizer,
+    load_model,
+    load_voice_encoder,
+    resolve_model_path,
+)
 from .model import VibeVoiceConfig, VibeVoiceModel
 
 SemanticCallbacks = tuple[Callable[[np.ndarray], np.ndarray], Callable[[], None]]
@@ -159,7 +165,7 @@ def _release_acoustic_encoder(model: VibeVoiceModel) -> None:
 def encode_voice_reference(
     wav: np.ndarray,
     num_vae_tokens: int,
-    model: VibeVoiceModel,
+    model: VibeVoiceModel | VoiceEncoderModel,
     config: VibeVoiceConfig,
     model_id: str,
 ) -> np.ndarray:
@@ -587,7 +593,7 @@ def main():
 
     # Encode-only mode: --ref-audio + --save-voice without --text
     if args.save_voice and args.ref_audio and not args.text:
-        model, config = load_model(args.model, quantize_bits=None)
+        model, config = load_voice_encoder(args.model)
         for i, audio_path in enumerate(args.ref_audio):
             wav = _load_and_resample(audio_path)
             if len(wav) > VOICE_CLONE_SAMPLES:
