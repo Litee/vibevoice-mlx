@@ -145,6 +145,17 @@ def _validate_voice_embeddings(embeds: np.ndarray, hidden_size: int, source: str
 # Voice encoding
 # ---------------------------------------------------------------------------
 
+def _release_acoustic_encoder(model: VibeVoiceModel) -> None:
+    """Release model-owned reference weights after one-shot voice preparation.
+
+    Voice embeddings are materialized NumPy arrays before this point. Keep
+    reusable library caches and all generation components intact.
+    """
+    if getattr(model, "_encoder_weights", None) is not None:
+        model._encoder_weights = None
+        mx.clear_cache()
+
+
 def encode_voice_reference(
     wav: np.ndarray,
     num_vae_tokens: int,
@@ -658,6 +669,9 @@ def main():
     else:
         input_ids = result
         print(f"Input: {len(input_ids)} tokens")
+
+    # Every raw reference is encoded; generation only needs its embeddings.
+    _release_acoustic_encoder(model)
 
     # Semantic encoder callback
     semantic_fn = None
