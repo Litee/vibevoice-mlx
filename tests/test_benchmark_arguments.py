@@ -192,8 +192,7 @@ def test_voice_encoding_strings_round_trip(
     assert child.returncode == 0, child.stderr
     assert "INJECTED_STRING" not in child.stdout.splitlines()
     observed = events(child)
-    assert observed["load_model"]["model"] == model
-    assert observed["load_model"]["quantize_bits"] is None
+    assert observed["load_voice_encoder"]["model"] == model
     assert observed["load_audio"]["path"] == reference
     assert observed["save_voice"]["path"] == save
     assert observed["encode_voice"] == {

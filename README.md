@@ -20,9 +20,9 @@ long-form memory use, and reliable measurement.
 | More reliable inputs and loading | Speaker labels are validated against supplied voices, reference audio and saved voices are checked, and model loading honors quantization metadata, shard indexes, and bundled tokenizer assets. |
 | Observable generation and benchmarking | Generation reports why it stopped. Benchmarks distinguish fixed-duration throughput from natural completion, verify the effective configuration, and support serial paired comparisons. |
 
-Selected historical paired benchmarks on the INT8 7B model illustrate several
-improvements. They used different code baselines and semantic backends; the
-linked PRs record each configuration and its limitations.
+Selected historical paired benchmarks illustrate several improvements, using
+INT8 7B unless otherwise noted. They used different code baselines and semantic
+backends; the linked PRs record each configuration and its limitations.
 
 | Improvement | Measured effect |
 |-------------|-----------------|
@@ -33,6 +33,7 @@ linked PRs record each configuration and its limitations.
 | [Bounded final VAE decode](https://github.com/Litee/vibevoice-mlx/pull/60) | A no-semantic 15-minute stress test reduced peak MLX allocation from 40.55 to 13.43 GiB. This path is not used by the default semantic mode. |
 | [Chunked LM prefill](https://github.com/Litee/vibevoice-mlx/pull/67) | Peak MLX allocation fell by 155.4 MiB for a 7,575-token prompt, with 0.51% slower prefill. |
 | [MLX 0.31.1 → 0.32.2](https://github.com/Litee/vibevoice-mlx/pull/83) | Five interleaved 7B INT8 MLX-semantic pairs, each generating 26.67 seconds, used 26.4% less generation time on the paired geometric mean; the 95% percentile-bootstrap interval was 22.3–30.6% less time. The changed audio passed human listening review. |
+| Lightweight voice encoding | Four fresh-process 7B encode-only pairs with runtime quantization disabled reduced median time from 4.390 to 0.393 seconds, peak MLX allocation from 16.223 to 1.600 GiB, and RSS from 10.587 to 0.790 GiB, with byte-exact embeddings. |
 
 These measurements compare individual changes on their original test workloads;
 single-pair timing results are observations rather than stable speedup estimates,
@@ -81,6 +82,9 @@ zero-based (`Speaker 0:`, `Speaker 1:`) or one-based (`Speaker 1:`, `Speaker 2:`
 when every explicit label is positive. Mixed numbering is interpreted as
 zero-based, and labels that do not map to a supplied voice are rejected. Raw
 reference audio uses at most its first 10 seconds.
+
+Using `--save-voice` without `--text` runs in encode-only mode, loading only
+the acoustic encoder and connector to create reusable voice embeddings.
 
 The default 200-speech-token budget produces at most about 26.7 seconds of
 audio. Raise `--max-speech-tokens` for longer input; the CLI warns when the
@@ -212,6 +216,7 @@ pauses must be preserved.
 - **Streaming semantic encoder**: 34-buffer causal CNN for real-time feedback
 - **CoreML semantic encoder**: Explicit recurrent caches with CPU/GPU or opt-in CPU/Neural Engine execution
 - **Selective quantization**: LLM backbone quantized (int4/int8), diffusion head stays full precision
+- **Lightweight voice encoding**: Encode-only mode loads just the acoustic encoder and connector
 - **Bounded long-form memory**: Chunked LM prefill and final VAE decode avoid retaining full-sequence intermediates
 - **Selective logits**: Projects only the control-token logits used during speech generation
 - **MLX-native RNG**: Seeded, on-device diffusion noise sampling

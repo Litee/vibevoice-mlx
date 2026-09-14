@@ -56,6 +56,11 @@ def load_model(model: str, quantize_bits: int | None = None) -> tuple[object, ob
     ), SimpleNamespace(quantization={"bits": int(source_bits)} if source_bits else None)
 
 
+def load_voice_encoder(model: str) -> tuple[object, object]:
+    event("load_voice_encoder", model=model)
+    return object(), SimpleNamespace(quantization=None)
+
+
 def load_audio(path: str) -> list[int]:
     event("load_audio", path=path)
     return [0] * 12
@@ -156,6 +161,7 @@ core.get_peak_memory = lambda: 1_000_000_000
 module("vibevoice_mlx")
 weights = module("vibevoice_mlx.load_weights")
 weights.load_model = load_model
+weights.load_voice_encoder = load_voice_encoder
 weights.resolve_model_path = lambda path: path
 weights.detect_tokenizer = detect_tokenizer
 pipeline = module("vibevoice_mlx.e2e_pipeline")
