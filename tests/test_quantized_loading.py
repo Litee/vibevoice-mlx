@@ -1,6 +1,7 @@
 """Quantized loading rejects incomplete or incompatible checkpoints."""
 
 import json
+import weakref
 from collections.abc import Iterator
 from dataclasses import asdict
 from pathlib import Path
@@ -62,16 +63,82 @@ def checkpoint_weights(
 
 
 def save_checkpoint(
-    path: Path, model: VibeVoiceModel, weights: dict[str, mx.array]
+    path: Path,
+    model: VibeVoiceModel,
+    weights: dict[str, mx.array],
+    *,
+    hf_format: bool = False,
 ) -> None:
     (path / "config.json").write_text(json.dumps(asdict(model.config)))
+    weights = {**weights, **tiny_vae_weights(model.config.vae_dim)}
+    if hf_format:
+        prefixes = {
+            "model": "model.language_model",
+            "diffusion_head": "model.prediction_head",
+            "acoustic_connector": "model.acoustic_connector",
+            "semantic_connector": "model.semantic_connector",
+            "vae_decoder": "model.acoustic_tokenizer.decoder",
+            "lm_head": "lm_head",
+        }
+        weights = {
+            prefixes[name.split(".", 1)[0]] + "." + name.split(".", 1)[1]: value
+            for name, value in weights.items()
+        }
     mx.save_safetensors(
         str(path / "model.safetensors"),
-        {
-            **weights,
-            **tiny_vae_weights(model.config.vae_dim),
-        },
+        weights,
     )
+
+
+@pytest.mark.parametrize("bits", [4, 8])
+@pytest.mark.parametrize("source_dtype", [mx.float16, mx.bfloat16, mx.float32])
+def test_hf_runtime_quantization_releases_consumed_source_tensors(
+    model: VibeVoiceModel,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    bits: int,
+    source_dtype: mx.Dtype,
+) -> None:
+    weights = {
+        name: value.astype(source_dtype)
+        for name, value in checkpoint_weights(model, prequantized=False).items()
+    }
+    save_checkpoint(tmp_path, model, weights, hf_format=True)
+    source_ref: weakref.ReferenceType[mx.array] | None = None
+    checked_release = False
+    original_load = mx.load
+    original_load_weights = VibeVoiceModel.load_weights
+
+    def track_checkpoint_load(
+        path: str, *args: object, **kwargs: object
+    ) -> dict[str, mx.array]:
+        nonlocal source_ref
+        weights = original_load(path, *args, **kwargs)
+        source_ref = weakref.ref(
+            weights["model.language_model.layers.0.self_attn.q_proj.weight"]
+        )
+        return weights
+
+    def track_load_weights(
+        self: VibeVoiceModel,
+        weights: list[tuple[str, mx.array]],
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        nonlocal checked_release
+        if any(name.startswith("model.layers.1.") for name, _ in weights):
+            assert source_ref is not None
+            assert source_ref() is None, "Consumed HF source tensor is still retained"
+            checked_release = True
+        original_load_weights(self, weights, *args, **kwargs)
+
+    monkeypatch.setattr(mx, "load", track_checkpoint_load)
+    monkeypatch.setattr(VibeVoiceModel, "load_weights", track_load_weights)
+
+    loaded, _ = load_model(str(tmp_path), quantize_bits=bits)
+
+    assert checked_release
+    assert isinstance(loaded.model.layers[0].self_attn.q_proj, nn.QuantizedLinear)
 
 
 def test_runtime_quantizes_and_evaluates_each_layer_before_loading_next(
@@ -134,11 +201,13 @@ def test_runtime_quantizes_and_evaluates_each_layer_before_loading_next(
 
 @pytest.mark.parametrize("bits", [4, 8])
 @pytest.mark.parametrize("source_dtype", [mx.float16, mx.bfloat16, mx.float32])
+@pytest.mark.parametrize("hf_format", [False, True], ids=["mlx", "hf"])
 def test_layerwise_runtime_quantization_matches_whole_model_exactly(
     model: VibeVoiceModel,
     tmp_path: Path,
     bits: int,
     source_dtype: mx.Dtype,
+    hf_format: bool,
 ) -> None:
     weights = checkpoint_weights(model, prequantized=False)
     weights = {
@@ -148,7 +217,7 @@ def test_layerwise_runtime_quantization_matches_whole_model_exactly(
         for name, value in weights.items()
     }
     model.load_weights(list(weights.items()))
-    save_checkpoint(tmp_path, model, weights)
+    save_checkpoint(tmp_path, model, weights, hf_format=hf_format)
     nn.quantize(
         model.model,
         bits=bits,

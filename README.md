@@ -34,6 +34,7 @@ backends; the linked PRs record each configuration and its limitations.
 | [Chunked LM prefill](https://github.com/Litee/vibevoice-mlx/pull/67) | Peak MLX allocation fell by 155.4 MiB for a 7,575-token prompt, with 0.51% slower prefill. |
 | [MLX 0.31.1 → 0.32.2](https://github.com/Litee/vibevoice-mlx/pull/83) | Five interleaved 7B INT8 MLX-semantic pairs, each generating 26.67 seconds, used 26.4% less generation time on the paired geometric mean; the 95% percentile-bootstrap interval was 22.3–30.6% less time. The changed audio passed human listening review. |
 | Lightweight voice encoding | Four fresh-process 7B encode-only pairs with runtime quantization disabled reduced median time from 4.390 to 0.393 seconds, peak MLX allocation from 16.223 to 1.600 GiB, and RSS from 10.587 to 0.790 GiB, with byte-exact embeddings. |
+| [Release consumed HF source weights](https://github.com/Litee/vibevoice-mlx/pull/76) | Four fresh-process 1.5B runtime INT4 loading pairs used an HF-key/header-remapped layout over unchanged MLX tensor data. Median load time fell from 0.2126 to 0.1633 seconds, peak MLX allocation from 4.4775 to 1.3631 GiB, and RSS from 3.1755 to 0.8122 GiB. |
 
 These measurements compare individual changes on their original test workloads;
 single-pair timing results are observations rather than stable speedup estimates,
