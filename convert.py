@@ -38,6 +38,14 @@ _CHECKPOINT_NAME = re.compile(
     r"model(?:-\d{5}-of-\d{5})?\.safetensors|model\.safetensors\.index\.json"
 )
 _TEMPLATE_NAME = re.compile(r"chat_template\.jinja|additional_chat_templates/[^/]+\.jinja")
+# Optional Qwen tokenizer files written by older serializers. Their absence in
+# a completed replacement bundle means they must no longer affect tokenization.
+_LEGACY_TOKENIZER_FILES = {
+    "special_tokens_map.json",
+    "added_tokens.json",
+    "vocab.json",
+    "merges.txt",
+}
 
 
 def convert_model(model_id: str, output_dir: Path, tokenizer_id: str | None = None,
@@ -141,7 +149,11 @@ def convert_model(model_id: str, output_dir: Path, tokenizer_id: str | None = No
         ]
         for path in candidates:
             name = path.relative_to(destination).as_posix()
-            managed = _CHECKPOINT_NAME.fullmatch(name) or _TEMPLATE_NAME.fullmatch(name)
+            managed = (
+                _CHECKPOINT_NAME.fullmatch(name)
+                or _TEMPLATE_NAME.fullmatch(name)
+                or name in _LEGACY_TOKENIZER_FILES
+            )
             if managed and name not in current_files:
                 path.unlink()
 
