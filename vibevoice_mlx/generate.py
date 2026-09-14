@@ -105,6 +105,15 @@ class GenerationMetrics:
         return result
 
 
+class NonFiniteAudioError(FloatingPointError):
+    """Decoded audio failed validation before it could be returned safely."""
+
+    def __init__(self, audio: np.ndarray, metrics: GenerationMetrics):
+        super().__init__("Generated audio contains non-finite samples.")
+        self.audio = audio
+        self.metrics = metrics
+
+
 # ---------------------------------------------------------------------------
 # DPM-Solver++ 2M — ODE and SDE variants (all MLX, batched CFG)
 # ---------------------------------------------------------------------------
@@ -775,8 +784,10 @@ def generate(
             full_audio = model.vae_decoder(full_latent)
             mx.eval(full_audio)
             audio_out = np.array(full_audio).squeeze().astype(np.float32)
+        # Trimming must not hide invalid decoder output behind a finite prefix.
+        finite_audio = bool(np.isfinite(audio_out).all())
         do_trim = opts.trim_trailing_silence if opts.trim_trailing_silence is not None else opts.silence_detection
-        if do_trim:
+        if finite_audio and do_trim:
             audio_out = _trim_trailing_silence(
                 audio_out,
                 threshold=opts.silence_threshold,
@@ -792,6 +803,9 @@ def generate(
 
     # Free MLX metal buffer pool so repeated calls don't grow unbounded.
     mx.clear_cache()
+
+    if all_latents and not finite_audio:
+        raise NonFiniteAudioError(audio_out, metrics)
 
     return audio_out, metrics
 

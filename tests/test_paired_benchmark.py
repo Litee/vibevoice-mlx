@@ -247,6 +247,25 @@ def test_low_or_unknown_memory_prevents_every_worker(
     assert summary["complete_pairs"] == 0
 
 
+def test_missing_waveform_cannot_contribute_to_paired_comparisons(
+    paired: tuple, tmp_path: Path
+) -> None:
+    runner, plan, output, _ = paired
+    plan.update(seeds=[1], repeats=1)
+    worker = Path(plan["A"]) / "bench_compare.py"
+    worker.write_text(
+        worker.read_text()
+        + "\n_original_script = make_script\ndef make_script():\n"
+        + '    return _original_script() + "\\ndel audio\\n"\n'
+    )
+    source = tmp_path / "plan.json"
+    source.write_text(json.dumps(plan))
+    assert runner.main(["--plan", str(source), "--output", str(output)]) == 1
+    trials = json.loads((output / "trials.json").read_text())["trials"]
+    assert [trial["status"] for trial in trials] == ["worker_failed", "ok"]
+    assert json.loads((output / "summary.json").read_text())["complete_pairs"] == 0
+
+
 def test_held_generation_lock_prevents_launch(paired: tuple, tmp_path: Path) -> None:
     runner, plan, output, launches = paired
     source = tmp_path / "plan.json"
@@ -277,7 +296,9 @@ def test_empty_or_malformed_generation_is_a_failed_trial(
 ) -> None:
     runner, plan, output, _ = paired
     plan.update(seeds=[1], repeats=1)
-    code = "print(" + repr("BENCH_RESULT:" + json.dumps(result)) + ")"
+    code = (
+        "audio = [0.1, 0.2]\nprint(" + repr("BENCH_RESULT:" + json.dumps(result)) + ")"
+    )
     (Path(plan["A"]) / "bench_compare.py").write_text(
         "def make_script():\n    return " + repr(code)
     )
@@ -324,7 +345,11 @@ def test_comparison_uses_matched_trials_and_labels_first_generation_scope(
                 "voice_reference": "none",
             },
         }
-        code = "print(" + repr("BENCH_RESULT:" + json.dumps(result)) + ")"
+        code = (
+            "audio = [0.1, 0.2]\nprint("
+            + repr("BENCH_RESULT:" + json.dumps(result))
+            + ")"
+        )
         (Path(plan[side]) / "bench_compare.py").write_text(
             "def make_script():\n    return " + repr(code)
         )
@@ -463,7 +488,7 @@ def test_actual_imported_files_are_identified_by_content_not_local_paths(
         package.mkdir()
         (package / "__init__.py").write_text("")
         (package / "generate.py").write_text("marker = " + repr(side))
-        code = 'import vibevoice_mlx.generate\nprint(\'BENCH_RESULT:{"gen_s":1,"audio_s":2,"rtf":2,"speech_tokens":2,"peak_mem_gb":1,"effective":{"quantization":"fp16","semantic_backend":"mlx","voice_reference":"none"}}\')'
+        code = 'import vibevoice_mlx.generate\naudio = [0.1, 0.2]\nprint(\'BENCH_RESULT:{"gen_s":1,"audio_s":2,"rtf":2,"speech_tokens":2,"peak_mem_gb":1,"effective":{"quantization":"fp16","semantic_backend":"mlx","voice_reference":"none"}}\')'
         (Path(plan[side]) / "bench_compare.py").write_text(
             "def make_script():\n    return " + repr(code)
         )
@@ -709,7 +734,9 @@ def test_unknown_worker_configuration_is_excluded_without_leaking_strings(
     }
     if effective is not None:
         result["effective"] = effective
-    script = "print(" + repr("BENCH_RESULT:" + json.dumps(result)) + ")"
+    script = (
+        "audio = [0.1, 0.2]\nprint(" + repr("BENCH_RESULT:" + json.dumps(result)) + ")"
+    )
     (Path(plan["A"]) / "bench_compare.py").write_text(
         "def make_script():\n    return " + repr(script)
     )
@@ -776,3 +803,31 @@ def test_unprovable_legacy_model_configuration_fails_closed(
     first = json.loads((output / "trials.json").read_text())["trials"][0]
     assert first["status"] == "unknown_configuration"
     assert first["effective"]["quantization"] is None
+
+
+@pytest.mark.parametrize("sample", ["nan", "inf", "-inf"])
+@pytest.mark.parametrize("legacy", [False, True])
+def test_nonfinite_audio_cannot_contribute_to_paired_comparisons(
+    paired: tuple,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    sample: str,
+    legacy: bool,
+) -> None:
+    runner, plan, output, _ = paired
+    plan.update(seeds=[1], repeats=1)
+    if legacy:
+        shutil.copyfile(
+            Path(__file__).with_name("legacy_benchmark_worker.py"),
+            Path(plan["A"]) / "bench_compare.py",
+        )
+    monkeypatch.setenv("BENCH_TEST_AUDIO_SAMPLE", sample)
+    source = tmp_path / "plan.json"
+    source.write_text(json.dumps(plan))
+    assert runner.main(["--plan", str(source), "--output", str(output)]) == 1
+    trials = json.loads((output / "trials.json").read_text())["trials"]
+    assert [trial["status"] for trial in trials] == ["worker_failed"] * 2
+    assert all("metrics" not in trial for trial in trials)
+    summary = json.loads((output / "summary.json").read_text())
+    assert summary["complete_pairs"] == 0
+    assert summary["successful_trials"] == 0

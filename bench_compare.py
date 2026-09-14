@@ -46,6 +46,7 @@ import json, time, os, sys
 from pathlib import Path
 os.environ["TRANSFORMERS_VERBOSITY"] = "error"
 import mlx.core as mx
+import numpy as np
 from vibevoice_mlx.load_weights import detect_tokenizer, load_model
 from vibevoice_mlx.generate import generate, GenerationOptions
 from vibevoice_mlx.e2e_pipeline import (tokenize_text, VoiceCloneData, SAMPLE_RATE,
@@ -131,6 +132,9 @@ audio, metrics = generate(
     voice_embeds=voice_embeds,
 )
 gen_s = time.perf_counter() - t0
+
+if not np.isfinite(audio).all():
+    raise RuntimeError("Generated audio contains non-finite samples")
 
 summary = metrics.summary()
 peak = mx.get_peak_memory() / 1e9

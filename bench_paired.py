@@ -85,6 +85,11 @@ def effective_configuration(state: dict) -> dict:
 state = {}
 try:
     exec(runpy.run_path("bench_compare.py")["make_script"](), state)
+    # Older checkouts may report success despite NaN/Inf in the generated audio.
+    # Validate their waveform too before accepting the child exit status.
+    import numpy as np
+    if not np.isfinite(state["audio"]).all():
+        raise RuntimeError("Generated audio contains non-finite samples")
 finally:
     # Capture before provenance hashing adds its own temporary allocations.
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
