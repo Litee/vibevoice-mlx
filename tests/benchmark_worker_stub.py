@@ -123,7 +123,10 @@ def generate(**kwargs: Any) -> tuple[list[float], SimpleNamespace]:
         semantic_reset=kwargs["semantic_reset_fn"] is not None,
         voice_positions=sorted(kwargs["voice_embeds"] or {}),
     )
-    return [0.1, 0.2], SimpleNamespace(
+    audio = [0.1, 0.2]
+    if os.environ.get("BENCH_TEST_AUDIO_SAMPLE"):
+        audio[-1] = float(os.environ["BENCH_TEST_AUDIO_SAMPLE"])
+    return audio, SimpleNamespace(
         summary=lambda: {"audio_seconds": 2.0, "stop_reason": "speech_end"},
         num_speech_tokens=2,
     )

@@ -410,3 +410,33 @@ def test_cli_persists_configuration_metadata(
     }
     assert rows[1][1]["effective"]["semantic_backend"] == "none"
     assert all(result["requested"] == result["effective"] for _, result in rows)
+
+
+@pytest.mark.parametrize("sample", ["nan", "inf", "-inf"])
+@pytest.mark.parametrize("save_audio", [False, True])
+def test_nonfinite_audio_cannot_be_written_or_reported_as_success(
+    sample: str,
+    save_audio: bool,
+    workers: list[subprocess.CompletedProcess[str]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BENCH_TEST_AUDIO_SAMPLE", sample)
+    args = Namespace(model="model", voice_arg=None, text="Hello", seed=0, max_tokens=1)
+    result = benchmark.run_config(
+        "fp16", {}, args, audio_dir=tmp_path if save_audio else None
+    )
+    assert result is None
+    child = workers[-1]
+    assert child.returncode != 0
+    assert "non-finite" in child.stderr
+    assert "BENCH_RESULT:" not in child.stdout
+    assert "write_audio" not in events(child)
+
+
+def test_finite_out_of_range_audio_is_accepted_by_benchmark(
+    workers: list[subprocess.CompletedProcess[str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("BENCH_TEST_AUDIO_SAMPLE", "2.0")
+    args = Namespace(model="model", voice_arg=None, text="Hello", seed=0, max_tokens=1)
+    assert benchmark.run_config("fp16", {}, args) is not None

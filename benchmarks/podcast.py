@@ -24,6 +24,7 @@ from vibevoice_mlx.e2e_pipeline import (
 )
 from vibevoice_mlx.generate import (
     GenerationOptions,
+    NonFiniteAudioError,
     _validate_cfg_scale,
     _validate_diffusion_steps,
     generate,
@@ -97,15 +98,55 @@ def main() -> None:
     semantic_fn, semantic_reset = semantic
     setup_seconds = time.perf_counter() - start_setup
     start_warmup = time.perf_counter()
-    generate(
-        model,
-        prompt.input_ids,
-        replace(options, max_speech_tokens=8),
-        semantic_encoder_fn=semantic_fn,
-        semantic_reset_fn=semantic_reset,
-        voice_embeds=voice_embeds,
-        estimated_total=8,
-    )
+    try:
+        generate(
+            model,
+            prompt.input_ids,
+            replace(options, max_speech_tokens=8),
+            semantic_encoder_fn=semantic_fn,
+            semantic_reset_fn=semantic_reset,
+            voice_embeds=voice_embeds,
+            estimated_total=8,
+        )
+    except NonFiniteAudioError as error:
+        semantic_reset()
+        mx.synchronize()
+        warmup_seconds = time.perf_counter() - start_warmup
+        nonfinite_samples = int(
+            error.audio.size - np.count_nonzero(np.isfinite(error.audio))
+        )
+        failure = "Non-finite audio during warmup"
+        report = {
+            "phase": "warmup",
+            "backend": args.backend,
+            "mode": args.mode,
+            "generation_provenance": args.generation_provenance,
+            "evaluation": {
+                "status": "failed",
+                "passed": False,
+                "failure": failure,
+                "natural_completion": False,
+                "natural_fidelity_eligible": False,
+            },
+            "model": args.model,
+            "solver": options.solver,
+            "diffusion_steps": options.diffusion_steps,
+            "seed": options.seed,
+            "cfg_scale": options.cfg_scale,
+            "max_speech_tokens": options.max_speech_tokens,
+            "setup_seconds": setup_seconds,
+            "warmup_seconds": warmup_seconds,
+            "audio_seconds": error.audio.size / 24000,
+            "finite": False,
+            "nonfinite_samples": nonfinite_samples,
+            "peak_amplitude": None,
+            "metrics": error.metrics.summary(),
+        }
+        report_json = json.dumps(report, indent=2, allow_nan=False)
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.with_suffix(".json").write_text(report_json)
+        print(report_json, flush=True)
+        raise RuntimeError(failure) from error
     semantic_reset()
     mx.synchronize()
     warmup_seconds = time.perf_counter() - start_warmup
@@ -124,15 +165,18 @@ def main() -> None:
     fast_lm.select_token = select_token
     start = time.perf_counter()
     try:
-        audio, metrics = generate(
-            model,
-            prompt.input_ids,
-            options,
-            semantic_encoder_fn=semantic_fn,
-            semantic_reset_fn=semantic_reset,
-            voice_embeds=voice_embeds,
-            estimated_total=args.tokens,
-        )
+        try:
+            audio, metrics = generate(
+                model,
+                prompt.input_ids,
+                options,
+                semantic_encoder_fn=semantic_fn,
+                semantic_reset_fn=semantic_reset,
+                voice_embeds=voice_embeds,
+                estimated_total=args.tokens,
+            )
+        except NonFiniteAudioError as error:
+            audio, metrics = error.audio, error.metrics
         mx.synchronize()
     finally:
         fast_lm.select_token = original_select
@@ -245,7 +289,8 @@ def main() -> None:
         "metrics": metrics.summary(),
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    sf.write(str(args.output), audio, 24000, subtype="PCM_16")
+    if nonfinite_samples == 0:
+        sf.write(str(args.output), audio, 24000, subtype="PCM_16")
     report_json = json.dumps(report, indent=2, allow_nan=False)
     args.output.with_suffix(".json").write_text(report_json)
     print(report_json, flush=True)

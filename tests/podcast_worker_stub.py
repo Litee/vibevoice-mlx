@@ -97,9 +97,14 @@ def generate(
         raise RuntimeError("fixture generation failed")
     audio = np.full(selections[:-1].count(3) * 3200, 0.25, dtype=np.float32)
     audio.fill(float(os.environ.get("PODCAST_AUDIO_VALUE", "0.25")))
-    if os.environ.get("PODCAST_NONFINITE_AUDIO"):
-        audio[0] = float(os.environ["PODCAST_NONFINITE_AUDIO"])
-    return audio, SimpleNamespace(
+    nonfinite_sample = os.environ.get(
+        "PODCAST_NONFINITE_WARMUP"
+        if opts.max_speech_tokens == 8
+        else "PODCAST_NONFINITE_AUDIO"
+    )
+    if nonfinite_sample:
+        audio[0] = float(nonfinite_sample)
+    metrics = SimpleNamespace(
         summary=lambda: {
             "speech_tokens": selections[:-1].count(3),
             "stop_reason": os.environ.get("PODCAST_STOP_REASON", "eos"),
@@ -108,6 +113,9 @@ def generate(
         num_speech_tokens=selections[:-1].count(3)
         + int(os.environ.get("PODCAST_METRIC_ERROR", "0")),
     )
+    if nonfinite_sample:
+        raise generation.NonFiniteAudioError(audio, metrics)
+    return audio, metrics
 
 
 weights.load_model = load_model

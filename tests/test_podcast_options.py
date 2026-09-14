@@ -344,12 +344,18 @@ def test_empty_generation_saves_diagnostics_before_failing(
 
 
 @pytest.mark.parametrize("sample", ["nan", "inf", "-inf"])
+@pytest.mark.parametrize("existing_output", [False, True])
 def test_nonfinite_audio_saves_strict_json_diagnostics_before_failing(
     run_podcast: Callable[[list[str]], subprocess.CompletedProcess[str]],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     sample: str,
+    existing_output: bool,
 ) -> None:
+    output = tmp_path / "audio.wav"
+    previous_contents = b"previous successful output"
+    if existing_output:
+        output.write_bytes(previous_contents)
     monkeypatch.setenv("PODCAST_NONFINITE_AUDIO", sample)
     result = run_podcast([])
 
@@ -369,6 +375,43 @@ def test_nonfinite_audio_saves_strict_json_diagnostics_before_failing(
     assert report["metrics"]["speech_tokens"] == 2
     assert report["segment_trace"]["consumed_diffusion_tokens"] == 2
     assert report["audio_seconds"] == 6400 / 24000
+    if existing_output:
+        assert output.read_bytes() == previous_contents
+    else:
+        assert not output.exists()
+
+
+def test_nonfinite_warmup_saves_phase_diagnostics_before_failing(
+    run_podcast: Callable[[list[str]], subprocess.CompletedProcess[str]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PODCAST_NONFINITE_WARMUP", "nan")
+    result = run_podcast([])
+
+    assert result.returncode != 0
+    assert "Non-finite audio during warmup" in result.stderr
+    report_text = (tmp_path / "audio.json").read_text()
+    report = json.loads(report_text, parse_constant=reject_nonfinite_json)
+    stdout_report = "\n".join(
+        line
+        for line in result.stdout.splitlines()
+        if not line.startswith("PODCAST_EVENT:")
+    )
+    assert json.loads(stdout_report, parse_constant=reject_nonfinite_json) == report
+    assert report["phase"] == "warmup"
+    assert report["evaluation"] == {
+        "status": "failed",
+        "passed": False,
+        "failure": "Non-finite audio during warmup",
+        "natural_completion": False,
+        "natural_fidelity_eligible": False,
+    }
+    assert report["finite"] is False
+    assert report["nonfinite_samples"] == 1
+    assert report["metrics"]["speech_tokens"] == 2
+    assert not (tmp_path / "audio.wav").exists()
+    assert '"name": "restored", "value": true' in result.stdout
 
 
 @pytest.mark.parametrize(

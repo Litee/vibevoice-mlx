@@ -692,15 +692,18 @@ def main():
     mx.reset_peak_memory()
     t0 = time.perf_counter()
 
-    audio, metrics = generate(
-        model=model,
-        input_ids=input_ids,
-        opts=opts,
-        semantic_encoder_fn=semantic_fn,
-        semantic_reset_fn=semantic_reset,
-        voice_embeds=voice_embeds,
-        estimated_total=len(input_ids),
-    )
+    try:
+        audio, metrics = generate(
+            model=model,
+            input_ids=input_ids,
+            opts=opts,
+            semantic_encoder_fn=semantic_fn,
+            semantic_reset_fn=semantic_reset,
+            voice_embeds=voice_embeds,
+            estimated_total=len(input_ids),
+        )
+    except FloatingPointError as error:
+        parser.exit(status=1, message=f"Error: {error} Output file was not written.\n")
 
     gen_time = (time.perf_counter() - t0) * 1000
     summary = metrics.summary()
@@ -725,6 +728,11 @@ def main():
     print(f"  Peak memory: {peak_mem:.2f} GB")
 
     # Save
+    if not np.isfinite(audio).all():
+        parser.exit(
+            status=1,
+            message="Error: Generated audio contains non-finite samples; output file was not written.\n",
+        )
     if len(audio) > 0:
         import soundfile as sf
         sf.write(args.output, audio, SAMPLE_RATE)
