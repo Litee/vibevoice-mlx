@@ -11,7 +11,7 @@ dependencies = [
     "soundfile",
     "tqdm",
     "transformers>=4.40.0",
-    "huggingface_hub",
+    "huggingface-hub>=1.31.0",
 ]
 
 [project.optional-dependencies]
