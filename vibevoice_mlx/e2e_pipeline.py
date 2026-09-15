@@ -426,8 +426,11 @@ def _try_coreml_semantic(
     # so copy to a local directory on first use.
     if sem_enc_path is None:
         try:
-            from huggingface_hub import snapshot_download
             import shutil
+            import tempfile
+
+            from huggingface_hub import snapshot_download
+
             coreml_path = Path(snapshot_download(
                 "gafiatulin/vibevoice-semantic-encoder-mlpackage",
             ))
@@ -438,7 +441,18 @@ def _try_coreml_semantic(
                 local_enc = local_cache / "semantic_encoder_streaming.mlpackage"
                 if not local_enc.exists():
                     local_cache.mkdir(parents=True, exist_ok=True)
-                    shutil.copytree(str(src), str(local_enc), copy_function=shutil.copy2)
+                    with tempfile.TemporaryDirectory(dir=local_cache) as directory:
+                        staged = Path(directory) / local_enc.name
+                        shutil.copytree(
+                            str(src), str(staged), copy_function=shutil.copy2
+                        )
+                        # Another process may have finished the same copy.
+                        if not local_enc.exists():
+                            try:
+                                staged.rename(local_enc)
+                            except OSError:
+                                if not local_enc.exists():
+                                    raise
                 sem_enc_path = local_enc
         except Exception:
             pass
