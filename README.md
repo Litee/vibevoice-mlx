@@ -35,6 +35,7 @@ backends; the linked PRs record each configuration and its limitations.
 | [MLX 0.31.1 → 0.32.2](https://github.com/Litee/vibevoice-mlx/pull/83) | Five interleaved 7B INT8 MLX-semantic pairs, each generating 26.67 seconds, used 26.4% less generation time on the paired geometric mean; the 95% percentile-bootstrap interval was 22.3–30.6% less time. The changed audio passed human listening review. |
 | Lightweight voice encoding | Four fresh-process 7B encode-only pairs with runtime quantization disabled reduced median time from 4.390 to 0.393 seconds, peak MLX allocation from 16.223 to 1.600 GiB, and RSS from 10.587 to 0.790 GiB, with byte-exact embeddings. |
 | [Release consumed HF source weights](https://github.com/Litee/vibevoice-mlx/pull/76) | Four fresh-process 1.5B runtime INT4 loading pairs used an HF-key/header-remapped layout over unchanged MLX tensor data. Median load time fell from 0.2126 to 0.1633 seconds, peak MLX allocation from 4.4775 to 1.3631 GiB, and RSS from 3.1755 to 0.8122 GiB. |
+| Selective semantic weight loading | Four fresh-process 7B INT8 pairs reduced median MLX semantic setup time from 0.652 to 0.157 seconds. The candidate was faster in every pair and produced byte-identical semantic embeddings; memory measurements were inconclusive. |
 
 These measurements compare individual changes on their original test workloads;
 single-pair timing results are observations rather than stable speedup estimates,
@@ -219,6 +220,7 @@ including terminal silence.
 - **CoreML semantic encoder**: Explicit recurrent caches with CPU/GPU or opt-in CPU/Neural Engine execution
 - **Selective quantization**: LLM backbone quantized (int4/int8), diffusion head stays full precision
 - **Lightweight voice encoding**: Encode-only mode loads just the acoustic encoder and connector
+- **Selective semantic loading**: Indexed checkpoints open only shards containing semantic encoder weights
 - **Bounded long-form memory**: Chunked LM prefill and final VAE decode avoid retaining full-sequence intermediates
 - **Selective logits**: Projects only the control-token logits used during speech generation
 - **MLX-native RNG**: Seeded, on-device diffusion noise sampling

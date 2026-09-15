@@ -490,12 +490,14 @@ def _try_mlx_semantic(
 
         logger.info("Loading semantic encoder weights...")
         model_path = resolve_model_path(model_id)
-        raw = _load_safetensors(model_path)
+        raw = _load_safetensors(
+            model_path,
+            lambda name: name.startswith(
+                ("model.semantic_tokenizer.encoder.", "semantic_encoder.")
+            ),
+        )
 
-        sem_keys = {k: v for k, v in raw.items()
-                    if k.startswith("model.semantic_tokenizer.encoder.")
-                    or k.startswith("semantic_encoder.")}
-        if not sem_keys:
+        if not raw:
             logger.info("  No semantic encoder weights found")
             return None
 
