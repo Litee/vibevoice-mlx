@@ -3,6 +3,7 @@
 import json
 from dataclasses import asdict
 from pathlib import Path
+from types import SimpleNamespace
 
 import mlx.core as mx
 import numpy as np
@@ -178,6 +179,88 @@ def test_indexed_loader_skips_shards_without_voice_tensors(
     model, _ = load_voice_encoder(str(checkpoint))
 
     assert model._encoder_weights
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    ["acoustic_encoder.", "model.acoustic_tokenizer.encoder."],
+)
+def test_voice_reference_fallback_loads_only_indexed_encoder_shards(
+    checkpoint: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prefix: str,
+) -> None:
+    raw_encoder = acoustic_encoder_weights(prefix)
+    mx.save_safetensors(str(checkpoint / "voice.safetensors"), raw_encoder)
+    (checkpoint / "model.safetensors").unlink()
+    (checkpoint / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "weight_map": {
+                    **dict.fromkeys(raw_encoder, "voice.safetensors"),
+                    "model.layers.0.self_attn.q_proj.weight": "missing.safetensors",
+                }
+            }
+        )
+    )
+    config = SimpleNamespace(speech_bias_factor=-0.05, speech_scaling_factor=0.2)
+    connector = Connector(4, 64)
+    direct_model = SimpleNamespace(
+        _encoder_weights=vae_encoder.load_vae_encoder_weights(raw_encoder),
+        acoustic_connector=connector,
+    )
+    fallback_model = SimpleNamespace(
+        _encoder_weights=None,
+        acoustic_connector=connector,
+    )
+    wav = np.random.RandomState(73).normal(0, 0.1, 3200).astype(np.float32)
+    expected = e2e_pipeline.encode_voice_reference(
+        wav, 1, direct_model, config, "unused"
+    )
+    monkeypatch.setattr(
+        e2e_pipeline.encode_voice_reference, "_enc_cache", {}, raising=False
+    )
+
+    actual = e2e_pipeline.encode_voice_reference(
+        wav, 1, fallback_model, config, str(checkpoint)
+    )
+    np.testing.assert_array_equal(actual, expected)
+
+    (checkpoint / "voice.safetensors").unlink()
+    cached = e2e_pipeline.encode_voice_reference(
+        wav, 1, fallback_model, config, str(checkpoint)
+    )
+    np.testing.assert_array_equal(cached, expected)
+
+
+def test_voice_reference_fallback_preserves_missing_encoder_error(
+    checkpoint: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (checkpoint / "model.safetensors").unlink()
+    (checkpoint / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "weight_map": {
+                    "model.layers.0.self_attn.q_proj.weight": "missing.safetensors"
+                }
+            }
+        )
+    )
+    model = SimpleNamespace(_encoder_weights=None)
+    config = SimpleNamespace(speech_bias_factor=-0.05, speech_scaling_factor=0.2)
+    monkeypatch.setattr(
+        e2e_pipeline.encode_voice_reference, "_enc_cache", {}, raising=False
+    )
+
+    with pytest.raises(RuntimeError, match="No acoustic encoder weights found"):
+        e2e_pipeline.encode_voice_reference(
+            np.zeros(3200, dtype=np.float32),
+            1,
+            model,
+            config,
+            str(checkpoint),
+        )
 
 
 def test_loader_distinguishes_absent_from_partial_encoder(

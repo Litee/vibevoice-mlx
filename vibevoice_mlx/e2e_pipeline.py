@@ -174,8 +174,8 @@ def encode_voice_reference(
     Uses the model's own acoustic tokenizer encoder weights directly.
     Returns embeddings of shape (num_vae_tokens, hidden_size).
     """
-    from .vae_encoder import load_vae_encoder_weights, encode_audio
-    from .load_weights import resolve_model_path, _load_safetensors
+    from .load_weights import _load_safetensors, resolve_model_path
+    from .vae_encoder import encode_audio, load_vae_encoder_weights
 
     # Prefer pre-extracted encoder weights from load_model() to avoid
     # reloading all safetensors (~18 GB for large models).
@@ -188,11 +188,14 @@ def encode_voice_reference(
             encode_voice_reference._enc_cache = {}
         if cache_key not in encode_voice_reference._enc_cache:
             model_path = resolve_model_path(model_id)
-            raw = _load_safetensors(model_path)
-            has_enc = (
-                any(k.startswith("model.acoustic_tokenizer.encoder.") for k in raw)
-                or any(k.startswith("acoustic_encoder.") for k in raw)
+            encoder_prefixes = (
+                "model.acoustic_tokenizer.encoder.",
+                "acoustic_encoder.",
             )
+            raw = _load_safetensors(
+                model_path, lambda name: name.startswith(encoder_prefixes)
+            )
+            has_enc = any(k.startswith(encoder_prefixes) for k in raw)
             if not has_enc:
                 raise RuntimeError(
                     f"No acoustic encoder weights found in {model_path}. "
